@@ -297,10 +297,16 @@ init. A separate reaper signals it, which is why there is nothing left here.
 ## A preview in a browser
 
 `bb_liveview/examples/camera_spike` is a standalone application wiring this
-driver to an MJPEG preview route. It defaults to `bb_camera`'s synthetic
-camera, so it runs with no hardware, and switches to a real one with the
-`CAMERA_DEVICE` environment variable. Start there if what you want is to see
-the picture rather than the bytes.
+driver to an MJPEG preview route. Start there if what you want is to see the
+picture rather than the bytes.
+
+It has the same three settings as the smoke test above, in the same order:
+`bb_camera`'s synthetic camera by default (no hardware, no ffmpeg),
+`CAMERA_LAVFI=testsrc2` to run this driver against a synthetic ffmpeg source,
+and `CAMERA_DEVICE=/dev/video0` for the real thing. The triage is the same
+too — working on synthetic but not on lavfi is a `bb_camera` or `bb_liveview`
+problem; working on lavfi but not on the device is the camera or its
+permissions, and this README is where that is worked through.
 
 ## Options
 

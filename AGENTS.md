@@ -113,14 +113,18 @@ that diagnosis with a restart loop against hardware that is simply absent.
 
 The driver reports dimensions parsed from each frame's own `SOF` marker, and
 reports the frame rate as *requested* because it never queries the device's
-rate back. The chroma subsampling in `stream_info.metadata[:pixel_format]` is
-derived from the frame header's sampling factors and is `nil` before any frame
-has arrived — it is a chroma format such as `:I420`, which is what
-`Membrane.JPEG` means by the name, not a codec or a V4L2 input format. A measured rate goes to `Settings.measure/3`, which is a different
-claim. Do not promote a requested value to `:actual` without adding the query
-that would justify it, and do not add a list of supported resolutions — this
-driver does not enumerate device capabilities, and `v4l2-ctl
---list-formats-ext` is the honest answer.
+rate back. A measured rate goes to `Settings.measure/3`, which is a different
+claim.
+
+The chroma subsampling in `stream_info.metadata[:pixel_format]` is derived
+from the frame header's sampling factors, and is `nil` before any frame has
+arrived. It is a chroma format such as `:I420` — what `Membrane.JPEG` means by
+that name — not a codec and not a V4L2 input format.
+
+Do not promote a requested value to `:actual` without adding the query that
+would justify it, and do not add a list of supported resolutions: this driver
+does not enumerate device capabilities, and `v4l2-ctl --list-formats-ext` is
+the honest answer.
 
 ## Testing
 

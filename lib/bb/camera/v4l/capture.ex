@@ -81,8 +81,6 @@ defmodule BB.Camera.V4L.Capture do
   @default_drop_queue_len 8
   @default_fail_queue_len 256
   @default_stop_timeout_ms 2_000
-  @default_measure_every 30
-  @interval_smoothing 0.1
 
   @type frame :: %{
           data: binary(),
@@ -103,7 +101,6 @@ defmodule BB.Camera.V4L.Capture do
           | {:dropped, frames :: pos_integer()}
           | {:overloaded, queue_len :: pos_integer()}
           | {:sink_error, term()}
-          | {:measured_frame_rate, float()}
           | {:ready, BB.Camera.V4L.Jpeg.info()}
 
   @doc """
@@ -128,8 +125,6 @@ defmodule BB.Camera.V4L.Capture do
   - `:stop_timeout_ms` — how long ffmpeg gets to exit on its own after being
     asked politely, before the reaper signals it. Default
     #{@default_stop_timeout_ms}.
-  - `:measure_every` — report the measured frame rate every this many frames.
-    Default #{@default_measure_every}.
   - `:backend`, `:backend_opts` — defaults `BB.Camera.V4L.Backend.FFmpeg`
     and `[]`.
   - `:reaper` — the `BB.Camera.V4L.Reaper` to register the OS process with.
@@ -207,9 +202,6 @@ defmodule BB.Camera.V4L.Capture do
            reaper: reaper,
            sequence: Keyword.get(opts, :sequence_start, 0),
            sink: Keyword.fetch!(opts, :sink),
-           last_frame_time: nil,
-           measure_every: Keyword.get(opts, :measure_every, @default_measure_every),
-           mean_interval_ns: nil,
            pending: nil,
            started: false,
            stats: %{frames: 0, dropped: 0, discarded_bytes: 0},
@@ -380,32 +372,6 @@ defmodule BB.Camera.V4L.Capture do
     state
     |> Map.put(:sequence, state.sequence + 1)
     |> update_in([:stats, :frames], &(&1 + 1))
-    |> measure(monotonic_time)
-  end
-
-  # The requested frame rate is what ffmpeg was told; this is what the frames
-  # actually did. They are reported separately and labelled differently,
-  # because one of them is a measurement and the other is a request.
-  defp measure(state, monotonic_time) do
-    state = %{state | mean_interval_ns: smooth(state, monotonic_time)}
-
-    if state.mean_interval_ns && rem(state.stats.frames, state.measure_every) == 0 do
-      notify(state, {:measured_frame_rate, 1_000_000_000 / state.mean_interval_ns})
-    end
-
-    %{state | last_frame_time: monotonic_time}
-  end
-
-  defp smooth(%{last_frame_time: nil}, _monotonic_time), do: nil
-
-  defp smooth(state, monotonic_time) do
-    interval = monotonic_time - state.last_frame_time
-
-    cond do
-      interval <= 0 -> state.mean_interval_ns
-      is_nil(state.mean_interval_ns) -> interval * 1.0
-      true -> @interval_smoothing * interval + (1 - @interval_smoothing) * state.mean_interval_ns
-    end
   end
 
   defp report_discards(state, discards) do

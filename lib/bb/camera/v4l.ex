@@ -42,11 +42,12 @@ defmodule BB.Camera.V4L do
   back the nearest size it supports, and when it does, `BB.Camera.stream_info/2`
   reports the real one.
 
-  The frame rate is reported as **requested**, not negotiated. This driver does
-  not query the device's rate back and does not parse it out of ffmpeg's
-  console output, so claiming it as actual would be a guess dressed up as a
-  measurement. A rate measured from the frames themselves is reported
-  separately, as a measurement.
+  The frame rate in `stream_info` is the one that was **requested**, not the
+  negotiated one. This driver does not query the device's rate back and does
+  not parse it out of ffmpeg's console output, so claiming it as actual would
+  be a guess dressed up as a measurement. What the frames actually did is
+  measured by `BB.Camera.Hub`, which sees every one of them, and reported
+  separately in `BB.Message.Camera.CaptureState`.
 
   Nothing here enumerates the device's capabilities. Any positive width and
   height and any positive rational frame rate can be asked for; if the device

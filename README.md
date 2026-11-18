@@ -362,9 +362,9 @@ ffmpeg ──pipe──> Capture ──frames──> BB.Camera.Hub ──> consu
   an IMU or an encoder. Something that carries hardware capture timestamps is
   needed for that, and this driver is not it.
 - **The frame rate is reported as requested, not negotiated.** This driver
-  does not query the device's rate back, so it does not claim it. A rate
-  measured from the frames themselves is reported separately, as a
-  measurement.
+  does not query the device's rate back, so it does not claim it. What the
+  frames actually did is measured by `BB.Camera.Hub` and reported separately
+  in `BB.Message.Camera.CaptureState`.
 - **No capability enumeration.** `v4l2-ctl --list-formats-ext` is the answer;
   the camera owns it.
 - **A failed capture is not retried.** The failure is reported and capture

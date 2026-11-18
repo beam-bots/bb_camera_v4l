@@ -259,17 +259,6 @@ defmodule BB.Camera.V4L.CaptureTest do
       refute_received {:signalled, _os_pid, _signal}
     end
 
-    test "reports the frame rate the frames actually arrived at", context do
-      %{stub: stub, capture: capture} = start_capture(context, measure_every: 2)
-
-      for size <- [16, 32, 48, 64] do
-        :ok = StubBackend.feed(stub, JpegBuilder.build(width: size, height: size))
-      end
-
-      assert_receive {:bb_camera_v4l, ^capture, {:measured_frame_rate, rate}}
-      assert rate > 0
-    end
-
     test "signals the OS process when it ignores the polite request", context do
       os_pid = String.to_integer(System.pid())
 

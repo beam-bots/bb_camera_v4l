@@ -119,12 +119,12 @@ is the negotiated geometry rather than the requested one, and hands it to
 `Hub.update_stream_info/2`. The frame rate in `stream_info` is only ever the
 one that was *asked for*: this driver never queries the device's rate back.
 
-`Capture` does measure the real rate from the intervals between frames and
-emits `{:measured_frame_rate, rate}`, but nothing consumes it at the moment —
-it used to go to a settings struct that no longer exists, and its replacement
-is a periodic telemetry message that hasn't been written yet. A measurement is
-a different claim from a setting, and whatever carries it must keep them
-apart.
+This driver does not measure the real rate, and should not start. Every frame
+goes through `BB.Camera.Hub.deliver/2`, so the hub counts them itself and
+publishes `BB.Message.Camera.CaptureState`. Measuring here as well would be a
+second answer to one question, and a worse one — the hub's window closes on a
+clock, so it still reports when frames have stopped, which an every-N-frames
+measurement in the driver cannot do.
 
 The chroma subsampling in `stream_info.metadata[:pixel_format]` is derived
 from the frame header's sampling factors, and is `nil` before any frame has

@@ -24,9 +24,9 @@ Consumers go through [`bb_camera`](https://github.com/beam-bots/bb_camera),
 which shares one capture between all of them. Two browser tabs previewing the
 same camera produce one ffmpeg, not two.
 
-**Frames never travel on the robot's pubsub.** That carries capture and
-settings lifecycle only — `BeginCapture`, `EndCapture`, `ApplySettings`,
-`RejectSettings`. Frame bytes go over `bb_camera`'s bounded media interface.
+**Frames never travel on the robot's pubsub.** That carries capture lifecycle
+only — `BeginCapture` and `EndCapture`. Frame bytes go over `bb_camera`'s
+bounded media interface.
 
 ## Status
 
@@ -369,11 +369,12 @@ ffmpeg ──pipe──> Capture ──frames──> BB.Camera.Hub ──> consu
   the camera owns it.
 - **A failed capture is not retried.** The failure is reported and capture
   ends. Reopening is the consumer's decision, taken by subscribing again.
-- **A settings change restarts ffmpeg.** V4L2 negotiates on open, so a new size
-  or rate means a new capture: `EndCapture`, then `BeginCapture` once the
-  replacement produces a frame. The old ffmpeg is confirmed gone before the new
-  one is started, and if its teardown cannot be confirmed the replacement is
-  refused rather than left to contend for the device.
+- **Changing an option that reaches ffmpeg restarts it.** V4L2 negotiates on
+  open, so a new size or rate means a new capture: `EndCapture`, then
+  `BeginCapture` once the replacement produces a frame. The old ffmpeg is
+  confirmed gone before the new one is started, and if its teardown cannot be
+  confirmed the replacement is refused rather than left to contend for the
+  device.
 - **The ingress limits are fail-fast, not a memory bound.** `fail_queue_len`
   counts queued reads this driver has *observed*, and it only observes them
   when it is scheduled; a starved process accumulates messages without running

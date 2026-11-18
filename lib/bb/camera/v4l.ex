@@ -56,17 +56,20 @@ defmodule BB.Camera.V4L do
 
   ## Frames do not go on pubsub
 
-  A robot's pubsub carries capture and settings lifecycle only:
-  `BB.Message.Camera.BeginCapture`, `EndCapture`, `ApplySettings` and
-  `RejectSettings`, published by the hub. Frame bytes travel over
-  `BB.Camera`'s bounded media interface, and never appear in an event or an
-  error.
+  A robot's pubsub carries capture lifecycle only:
+  `BB.Message.Camera.BeginCapture` and `EndCapture`, published by the hub.
+  Frame bytes travel over `BB.Camera`'s bounded media interface, and never
+  appear in an event or an error.
 
   ## Options
 
   See `options_schema/0`. The ones most worth knowing about are `:device`,
   `:width`, `:height` and `:frame_rate`; the rest are bounds with defaults that
   suit a desktop and may want lowering on a small target.
+
+  Any of them can be filled from a parameter with `param/1`, and changing that
+  parameter while the robot runs reconfigures the camera - see
+  `handle_options/2`.
 
   ## Limitations
 
@@ -80,10 +83,10 @@ defmodule BB.Camera.V4L do
     ends; reopening the device is the consumer's decision, taken by subscribing
     again. A driver that quietly reopened hardware on its own would be claiming
     to capture during a window where it is not.
-  - **A settings change restarts ffmpeg**, because V4L2 negotiates format and
-    rate when the device is opened. Capture ends and begins again around the
-    change, with the events to match; it is not a seamless transition and does
-    not pretend to be.
+  - **Changing an option that reaches ffmpeg restarts it**, because V4L2
+    negotiates format and rate when the device is opened. Capture ends and
+    begins again around the change, with the events to match; it is not a
+    seamless transition and does not pretend to be.
   - **ffmpeg's diagnostics go to the VM's console**, not into the error. They
     cannot be merged into the frame stream without corrupting it.
   """
@@ -91,7 +94,7 @@ defmodule BB.Camera.V4L do
   use BB.Sensor
   use BB.Camera
 
-  alias BB.Camera.{Frame, Hub, Settings, StreamInfo}
+  alias BB.Camera.{Frame, Hub, StreamInfo}
   alias BB.Camera.V4L.{Capture, Command, FrameRate}
   alias BB.Error.Hardware.Camera.CaptureFailed
 
@@ -206,22 +209,6 @@ defmodule BB.Camera.V4L do
     end
   end
 
-  @doc """
-  What can be changed while the robot is running.
-
-  Changing any of these restarts ffmpeg, because V4L2 negotiates format and
-  rate when the device is opened. Capture stops and starts again around the
-  change; it is not a seamless transition and does not pretend to be.
-  """
-  @impl BB.Camera
-  def settings_schema do
-    Spark.Options.new!(
-      width: [type: :pos_integer, doc: "Width in pixels to ask the device for"],
-      height: [type: :pos_integer, doc: "Height in pixels to ask the device for"],
-      frame_rate: [type: FrameRate.option_type(), doc: "Frames per second to ask for"]
-    )
-  end
-
   @impl BB.Sensor
   def init(opts) do
     # A camera that cannot be opened is an ordinary condition - an unplugged
@@ -233,13 +220,7 @@ defmodule BB.Camera.V4L do
 
     with {:ok, stream_info} <- stream_info(opts),
          {:ok, command} <- build_command(opts) do
-      {:ok, hub} =
-        Hub.start_link(
-          bb: opts[:bb],
-          stream_info: stream_info,
-          settings: settings_for(command),
-          settings_schema: settings_schema()
-        )
+      {:ok, hub} = Hub.start_link(bb: opts[:bb], stream_info: stream_info)
 
       {:ok,
        %{
@@ -264,9 +245,6 @@ defmodule BB.Camera.V4L do
 
   def handle_info({:bb_camera, :stop_capture}, state),
     do: {:noreply, request_stop(state, :driver_stopped)}
-
-  def handle_info({:bb_camera, {:put_settings, settings, ref}}, state),
-    do: {:noreply, request_settings(state, settings, ref)}
 
   def handle_info({:bb_camera_v4l, capture, {:ready, info}}, %{capture: capture} = state),
     do: {:noreply, confirm(state, info)}
@@ -293,6 +271,31 @@ defmodule BB.Camera.V4L do
   end
 
   def handle_info(_message, state), do: {:noreply, state}
+
+  @doc """
+  Take up options that changed while the robot was running.
+
+  Reached when a `param/1` reference in the camera's DSL options resolves to a
+  new value. Only a change that alters the ffmpeg invocation restarts capture:
+  V4L2 negotiates format and rate when the device is opened, so a new size or
+  rate means a new ffmpeg. Capture stops and starts again around the change; it
+  is not a seamless transition and does not pretend to be. An option that
+  doesn't reach the command line - a framer bound, say - takes effect without
+  disturbing the stream.
+  """
+  @impl BB.Sensor
+  def handle_options(opts, state) do
+    with {:ok, stream_info} <- stream_info(opts),
+         {:ok, command} <- build_command(opts) do
+      state = %{state | opts: opts, stream_info: stream_info}
+
+      if command == state.command do
+        {:ok, state}
+      else
+        {:ok, restart_for(%{state | command: command})}
+      end
+    end
+  end
 
   @impl BB.Sensor
   def terminate(_reason, state) do
@@ -332,24 +335,15 @@ defmodule BB.Camera.V4L do
     state
   end
 
-  defp request_settings(state, settings, ref) do
-    opts = Keyword.merge(state.opts, Map.to_list(settings))
+  # A camera that isn't capturing has nothing to restart: the new command is
+  # already in state, and whenever the hub next asks for capture it is used.
+  defp restart_for(%{capture: capture} = state) when is_pid(capture),
+    do: begin_stop(state, :reconfigure)
 
-    with {:ok, stream_info} <- stream_info(opts),
-         {:ok, command} <- build_command(opts) do
-      state = %{state | command: command, opts: opts, stream_info: stream_info}
+  defp restart_for(%{stopping: stopping} = state) when is_pid(stopping),
+    do: queue(state, :reconfigure)
 
-      cond do
-        is_pid(state.capture) -> begin_stop(state, {:settings, ref})
-        is_pid(state.stopping) -> queue(state, {:settings, ref})
-        true -> settle_settings(state, ref)
-      end
-    else
-      {:error, error} ->
-        Hub.settings_result(state.hub, ref, {:error, error})
-        state
-    end
-  end
+  defp restart_for(state), do: state
 
   defp begin_stop(state, pending) do
     capture = state.capture
@@ -372,15 +366,13 @@ defmodule BB.Camera.V4L do
 
   defp run_pending(%{pending: :start} = state), do: start_capture(%{state | pending: nil})
 
-  defp run_pending(%{pending: {:settings, ref}} = state) do
-    # The docs promise an end and a beginning around a settings change, because
+  defp run_pending(%{pending: :reconfigure} = state) do
+    # The docs promise an end and a beginning around an option change, because
     # that is what actually happens: V4L2 negotiates on open, so a new size or
     # rate means a new ffmpeg.
     Hub.capture_stopped(state.hub, :driver_stopped)
 
-    %{state | pending: nil}
-    |> start_capture()
-    |> settle_settings(ref)
+    start_capture(%{state | pending: nil})
   end
 
   # A capture whose teardown could not be confirmed may still be holding the
@@ -395,8 +387,7 @@ defmodule BB.Camera.V4L do
 
     case state.pending do
       {:stop, stop_reason} -> Hub.capture_stopped(state.hub, stop_reason)
-      {:settings, ref} -> Hub.settings_result(state.hub, ref, {:error, error})
-      :start -> Hub.capture_failed(state.hub, error)
+      pending when pending in [:start, :reconfigure] -> Hub.capture_failed(state.hub, error)
       nil -> :ok
     end
 
@@ -405,12 +396,6 @@ defmodule BB.Camera.V4L do
 
   defp teardown_confirmed?({:shutdown, :teardown_unconfirmed}), do: false
   defp teardown_confirmed?(_reason), do: true
-
-  defp settle_settings(state, ref) do
-    Hub.settings_result(state.hub, ref, {:ok, settings_for(state.command)})
-
-    state
-  end
 
   defp start_capture(state) do
     hub = state.hub
@@ -512,15 +497,6 @@ defmodule BB.Camera.V4L do
     state
   end
 
-  defp handle_capture_event(state, {:measured_frame_rate, rate}) do
-    Hub.update_settings(
-      state.hub,
-      Settings.measure(settings_for(state.command), :frame_rate, rate)
-    )
-
-    state
-  end
-
   defp handle_capture_event(state, {:sink_error, reason}) do
     Logger.warning("#{inspect(camera_name(state))} could not deliver a frame: #{inspect(reason)}")
 
@@ -541,16 +517,6 @@ defmodule BB.Camera.V4L do
     end
   catch
     :exit, _reason -> state.sequence
-  end
-
-  # Only what `settings_schema/0` accepts. A value reported here that cannot be
-  # set there is rejected as an unknown key the next time anyone changes a
-  # setting, because the hub validates the merge of the two.
-  defp settings_for(command) do
-    %Settings{}
-    |> Settings.put(:width, command.width, :requested)
-    |> Settings.put(:height, command.height, :requested)
-    |> Settings.put(:frame_rate, FrameRate.to_float(command.frame_rate), :requested)
   end
 
   defp build_command(opts) do

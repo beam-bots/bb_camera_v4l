@@ -14,6 +14,9 @@ defmodule BB.Camera.V4L.Test.StubBot do
   The stub reports to whatever process is registered as
   `:bb_camera_v4l_stub_observer`, because the DSL is compiled long before any
   test process exists.
+
+  The width comes from a parameter, so a test can reconfigure the camera the
+  way a robot actually does. Its default is the width every other test expects.
   """
 
   use BB
@@ -22,13 +25,19 @@ defmodule BB.Camera.V4L.Test.StubBot do
     name(:bb_camera_v4l_stub_bot)
   end
 
+  parameters do
+    group :camera do
+      param(:width, type: :integer, default: 640)
+    end
+  end
+
   topology do
     link :head do
       sensor(
         :eye,
         {BB.Camera.V4L,
          device: "/dev/video0",
-         width: 640,
+         width: param([:camera, :width]),
          height: 480,
          frame_rate: 30,
          ffmpeg: "/nonexistent/ffmpeg",

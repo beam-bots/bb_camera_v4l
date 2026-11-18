@@ -7,7 +7,7 @@ defmodule BB.Camera.V4LTest do
   # The stub reports to a registered name, which is global.
   use ExUnit.Case, async: false
 
-  alias BB.Camera.{Media, Settings}
+  alias BB.Camera.Media
   alias BB.Camera.V4L
   alias BB.Camera.V4L.Command
   alias BB.Camera.V4L.Test.{JpegBuilder, StubBackend, StubBot}
@@ -196,17 +196,10 @@ defmodule BB.Camera.V4LTest do
 
       assert info.metadata.pixel_format == nil
     end
-
-    test "reports the frame rate as requested, not as negotiated" do
-      assert {:ok, settings} = BB.Camera.settings(StubBot, :eye)
-
-      assert Settings.get(settings, :frame_rate) == 30.0
-      refute Settings.actual?(settings, :frame_rate)
-    end
   end
 
-  describe "settings" do
-    test "a change is accepted through the public API and restarts capture" do
+  describe "reconfiguring from a parameter" do
+    test "a new width restarts capture with it" do
       BB.subscribe(StubBot, @topic)
 
       {:ok, session} = Media.open(StubBot, :eye, format: :jpeg)
@@ -215,7 +208,7 @@ defmodule BB.Camera.V4LTest do
       assert {:ok, _frame} = Media.next(session, 5_000)
       assert_receive {:bb, @topic, %BB.Message{payload: %BeginCapture{}}}
 
-      changer = Task.async(fn -> BB.Camera.put_settings(StubBot, :eye, %{width: 320}, 5_000) end)
+      :ok = BB.Parameter.set(StubBot, [:camera, :width], 320)
 
       # The running capture has to be gone before a replacement is opened.
       assert_receive {:stub_stop_requested, ^stub}
@@ -226,19 +219,13 @@ defmodule BB.Camera.V4LTest do
       assert_receive {:stub_opened, restarted, command}
       assert "320x480" in Command.argv(command)
 
-      assert {:ok, settings} = Task.await(changer, 10_000)
-      assert Settings.get(settings, :width) == 320
-
       # And the replacement only claims to be capturing once it really is.
       :ok = StubBackend.feed(restarted, JpegBuilder.build(width: 320, height: 480))
       assert_receive {:bb, @topic, %BB.Message{payload: %BeginCapture{}}}
     end
 
-    test "an unsettable key is rejected rather than silently ignored" do
-      assert {:error, error} =
-               BB.Camera.put_settings(StubBot, :eye, %{nonsense: true}, 5_000)
-
-      assert %BB.Error.Invalid.Camera.InvalidSettings{} = error
+    test "a value the driver's schema refuses never reaches it" do
+      assert {:error, _reason} = BB.Parameter.set(StubBot, [:camera, :width], "wide")
     end
   end
 

@@ -94,10 +94,13 @@ forgetting the old capture and starting a new one.
 bound between this package and `bb_camera`. Wrapping it in a `Task` would
 reintroduce the unbounded queue it exists to prevent.
 
-**Only report settings that `settings_schema/0` accepts.** The hub validates
-the merge of reported settings and a requested patch, so a value reported here
-that cannot be set there makes every later `put_settings/4` fail as an unknown
-key.
+**Reconfiguring is `handle_options/2`, and there is no second channel.** This
+driver once had a `settings_schema/0` holding `width`, `height` and
+`frame_rate` — the same three keys as its own `options_schema/0` — reached by
+a `put_settings` round trip. It was deleted: a robot fills those options from
+parameters with `param/1`, and `handle_options/2` is where a change lands.
+Restart capture only when the new options actually change the ffmpeg argument
+vector, so an option that never reaches the command line doesn't drop frames.
 
 **`stream_info/1` must stay pure.** Discovery calls it against robots that are
 not running, with options straight out of the DSL and parameter references
@@ -111,20 +114,27 @@ that diagnosis with a restart loop against hardware that is simply absent.
 
 ## Honesty about what is known
 
-The driver reports dimensions parsed from each frame's own `SOF` marker, and
-reports the frame rate as *requested* because it never queries the device's
-rate back. A measured rate goes to `Settings.measure/3`, which is a different
-claim.
+The driver reports dimensions parsed from each frame's own `SOF` marker, which
+is the negotiated geometry rather than the requested one, and hands it to
+`Hub.update_stream_info/2`. The frame rate in `stream_info` is only ever the
+one that was *asked for*: this driver never queries the device's rate back.
+
+`Capture` does measure the real rate from the intervals between frames and
+emits `{:measured_frame_rate, rate}`, but nothing consumes it at the moment —
+it used to go to a settings struct that no longer exists, and its replacement
+is a periodic telemetry message that hasn't been written yet. A measurement is
+a different claim from a setting, and whatever carries it must keep them
+apart.
 
 The chroma subsampling in `stream_info.metadata[:pixel_format]` is derived
 from the frame header's sampling factors, and is `nil` before any frame has
 arrived. It is a chroma format such as `:I420` — what `Membrane.JPEG` means by
 that name — not a codec and not a V4L2 input format.
 
-Do not promote a requested value to `:actual` without adding the query that
-would justify it, and do not add a list of supported resolutions: this driver
-does not enumerate device capabilities, and `v4l2-ctl --list-formats-ext` is
-the honest answer.
+Do not report a requested value as a negotiated one without adding the query
+that would justify it, and do not add a list of supported resolutions: this
+driver does not enumerate device capabilities, and
+`v4l2-ctl --list-formats-ext` is the honest answer.
 
 ## Testing
 

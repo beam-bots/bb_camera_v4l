@@ -41,8 +41,7 @@ bounded media interface.
 
 Not yet published. `bb_camera_v4l` and its `bb_camera` dependency are declared
 the way every package here declares `bb` — from Hex by default, and from the
-sibling checkout under `bb_workspace` when `BB_VERSION=local` is set, which is
-the only way they resolve until `bb_camera` is on Hex.
+sibling checkout under `bb_workspace` when `BB_VERSION=local` is set.
 
 ## Requirements
 

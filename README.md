@@ -4,7 +4,16 @@ SPDX-FileCopyrightText: 2026 James Harton
 SPDX-License-Identifier: Apache-2.0
 -->
 
+<img src="https://github.com/beam-bots/bb/blob/main/logos/beam_bots_logo.png?raw=true" alt="Beam Bots Logo" width="250" />
+
 # bb_camera_v4l
+
+[![CI](https://github.com/beam-bots/bb_camera_v4l/actions/workflows/ci.yml/badge.svg)](https://github.com/beam-bots/bb_camera_v4l/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache--2.0-green.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Hex version badge](https://img.shields.io/hexpm/v/bb_camera_v4l.svg)](https://hex.pm/packages/bb_camera_v4l)
+[![Hexdocs badge](https://img.shields.io/badge/docs-hexdocs-purple)](https://hexdocs.pm/bb_camera_v4l)
+[![REUSE status](https://api.reuse.software/badge/github.com/beam-bots/bb_camera_v4l)](https://api.reuse.software/info/github.com/beam-bots/bb_camera_v4l)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/beam-bots/bb_camera_v4l)
 
 A [Beam Bots](https://github.com/beam-bots/bb) camera driver for Linux V4L2
 devices — webcams, capture cards, CSI cameras — capturing MJPEG through a

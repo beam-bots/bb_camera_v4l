@@ -150,6 +150,11 @@ defmodule BB.Camera.V4L do
         required: false,
         doc: "Path to the ffmpeg executable. Defaults to the one on $PATH"
       ],
+      telemetry_clock: [
+        type: {:or, [{:tuple, [{:in, [:rate]}, :any]}, {:in, [:external]}]},
+        default: {:rate, 1},
+        doc: "How often the hub publishes `BB.Message.Camera.CaptureState`"
+      ],
       max_frame_bytes: [
         type: :pos_integer,
         default: 4 * 1024 * 1024,
@@ -221,7 +226,12 @@ defmodule BB.Camera.V4L do
 
     with {:ok, stream_info} <- stream_info(opts),
          {:ok, command} <- build_command(opts) do
-      {:ok, hub} = Hub.start_link(bb: opts[:bb], stream_info: stream_info)
+      {:ok, hub} =
+        Hub.start_link(
+          bb: opts[:bb],
+          stream_info: stream_info,
+          telemetry_clock: opts[:telemetry_clock]
+        )
 
       {:ok,
        %{
@@ -283,6 +293,13 @@ defmodule BB.Camera.V4L do
   is not a seamless transition and does not pretend to be. An option that
   doesn't reach the command line - a framer bound, say - takes effect without
   disturbing the stream.
+
+  **New options this driver cannot use stop the camera.** `handle_options/2`
+  has no way to refuse a change and stay running, so a value that satisfies
+  the parameter's declared type but not this driver - a width of `-1` against
+  a `:pos_integer` - takes the sensor down, and down again on each restart,
+  because the parameter was stored before anyone was asked about it. Declare
+  parameters with bounds that match the options they feed.
   """
   @impl BB.Sensor
   def handle_options(opts, state) do
@@ -295,6 +312,10 @@ defmodule BB.Camera.V4L do
       else
         {:ok, restart_for(%{state | command: command})}
       end
+    end
+    |> case do
+      {:ok, state} -> {:ok, state}
+      {:error, reason} -> {:stop, reason}
     end
   end
 

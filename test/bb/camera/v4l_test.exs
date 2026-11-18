@@ -224,8 +224,22 @@ defmodule BB.Camera.V4LTest do
       assert_receive {:bb, @topic, %BB.Message{payload: %BeginCapture{}}}
     end
 
-    test "a value the driver's schema refuses never reaches it" do
+    test "a value the parameter's own type refuses never reaches the driver" do
       assert {:error, _reason} = BB.Parameter.set(StubBot, [:camera, :width], "wide")
+    end
+
+    test "a value only the driver refuses takes the camera down with it" do
+      # `-1` satisfies the parameter's `type: :integer` and is stored, then
+      # fails the driver's `:pos_integer`. `handle_options/2` has no way to
+      # refuse and stay running, so the sensor stops - and restarts into the
+      # same stored value. This asserts the trap rather than endorsing it;
+      # see the note on `handle_options/2` in `BB.Camera.V4L`.
+      sensor = BB.Process.whereis(StubBot, :eye)
+      monitor = Process.monitor(sensor)
+
+      :ok = BB.Parameter.set(StubBot, [:camera, :width], -1)
+
+      assert_receive {:DOWN, ^monitor, :process, ^sensor, _reason}
     end
   end
 

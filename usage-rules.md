@@ -21,7 +21,7 @@ file covers only what is specific to this driver.
    tells the driver. One capture serves all of them; opening a second consumer
    does not start a second ffmpeg.
 3. **Frames do not go on pubsub.** The robot's topic carries capture lifecycle
-   and periodic telemetry only. Frame bytes travel over `BB.Camera.Media` or
+   and periodic capture state only. Frame bytes travel over `BB.Camera.Media` or
    `BB.Camera.subscribe/3`.
 4. **What a camera supports is the camera's business.** This driver does not
    enumerate formats or sizes. Ask for what you want and read back what you
@@ -101,8 +101,8 @@ from `30000/1001` and this driver will faithfully ask for the one you wrote.
 What the frames actually did is measured by `BB.Camera.Hub`, which sees every
 one of them, and published as `BB.Message.Camera.CaptureState` — and stamped
 on each frame as `measured_frame_rate`, next to `requested_frame_rate`.
-Compare the two rather than trusting either alone. `:telemetry_clock` sets how
-often that is published, `{:rate, 1}` by default.
+Compare the two rather than trusting either alone. `:publish_rate` sets how
+often that is published, `~u(1 hertz)` by default.
 
 ## Bounds you may need to change
 

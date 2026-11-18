@@ -95,6 +95,9 @@ defmodule BB.Camera.V4L do
   use BB.Sensor
   use BB.Camera
 
+  import BB.Unit
+  import BB.Unit.Option
+
   alias BB.Camera.{Frame, Hub, StreamInfo}
   alias BB.Camera.V4L.{Capture, Command, FrameRate}
   alias BB.Error.Hardware.Camera.CaptureFailed
@@ -150,9 +153,9 @@ defmodule BB.Camera.V4L do
         required: false,
         doc: "Path to the ffmpeg executable. Defaults to the one on $PATH"
       ],
-      telemetry_clock: [
-        type: {:or, [{:tuple, [{:in, [:rate]}, :any]}, {:in, [:external]}]},
-        default: {:rate, 1},
+      publish_rate: [
+        type: unit_type(compatible: :hertz),
+        default: ~u(1 hertz),
         doc: "How often the hub publishes `BB.Message.Camera.CaptureState`"
       ],
       max_frame_bytes: [
@@ -230,7 +233,7 @@ defmodule BB.Camera.V4L do
         Hub.start_link(
           bb: opts[:bb],
           stream_info: stream_info,
-          telemetry_clock: opts[:telemetry_clock]
+          publish_rate: opts[:publish_rate]
         )
 
       {:ok,

@@ -70,11 +70,11 @@ defmodule BB.Camera.V4L.MixProject do
 
   defp aliases, do: []
 
-  defp bb_dep(default) do
+  defp bb_dep(default, package \\ :bb) do
     case System.get_env("BB_VERSION") do
       nil -> default
-      "local" -> [path: "../bb", override: true]
-      "main" -> [git: "https://github.com/beam-bots/bb.git", override: true]
+      "local" -> [path: "../#{package}", override: true]
+      "main" -> [git: "https://github.com/beam-bots/#{package}.git", override: true]
       version -> "~> #{version}"
     end
   end
@@ -82,7 +82,7 @@ defmodule BB.Camera.V4L.MixProject do
   defp deps do
     [
       {:bb, bb_dep("~> 0.33")},
-      {:bb_camera, path: "../bb_camera"},
+      {:bb_camera, bb_dep("~> 0.1", :bb_camera)},
 
       # dev/test
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},

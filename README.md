@@ -30,9 +30,10 @@ bounded media interface.
 
 ## Status
 
-A spike. `bb_camera_v4l` and its `bb_camera` dependency are **not published on
-Hex** — both are local checkouts under `bb_workspace`, and `BB_VERSION=local`
-is what makes mix resolve them from there. Nothing here installs from Hex yet.
+Not yet published. `bb_camera_v4l` and its `bb_camera` dependency are declared
+the way every package here declares `bb` — from Hex by default, and from the
+sibling checkout under `bb_workspace` when `BB_VERSION=local` is set, which is
+the only way they resolve until `bb_camera` is on Hex.
 
 ## Requirements
 

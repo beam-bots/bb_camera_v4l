@@ -146,3 +146,10 @@ whose frames legitimately exceed the default.
 - Don't publish frames on pubsub, or put frame bytes in an error.
 - Don't use this on anything but Linux. The platform belongs in the driver,
   not in `bb_camera`'s interface; another platform wants another driver.
+
+## Further reading
+
+- [bb_camera_v4l docs](https://hexdocs.pm/bb_camera_v4l)
+- `BB.Camera.V4L` for the options and the parameters they feed
+- `bb_camera`'s usage rules for the hub, subscriptions and frames
+- `bb_camera_ffmpeg`'s usage rules for the capture this driver runs

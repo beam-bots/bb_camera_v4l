@@ -11,6 +11,13 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.2.0](https://github.com/beam-bots/bb_camera_v4l/compare/v0.1.0...v0.2.0) (2026-11-19)
+### Breaking Changes:
+
+* run ffmpeg under MuonTrap via `bb_camera_ffmpeg` (#1) by James Harton
+
+
+
 ## [v0.1.0](https://github.com/beam-bots/bb_camera_v4l/compare/v0.1.0...v0.1.0) (2026-11-18)
 ### Breaking Changes:
 

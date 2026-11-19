@@ -9,7 +9,7 @@ defmodule BB.Camera.V4L.MixProject do
   Beam Bots camera driver for Linux V4L2 devices, capturing MJPEG via ffmpeg.
   """
 
-  @version "0.1.0"
+  @version "0.2.0"
 
   def project do
     [

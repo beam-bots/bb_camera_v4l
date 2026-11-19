@@ -6,10 +6,9 @@ defmodule BB.Camera.V4L.CommandTest do
   @moduledoc false
   use ExUnit.Case, async: true
 
-  alias BB.Camera.V4L.{Command, FrameRate}
+  alias BB.Camera.V4L.Command
 
   doctest BB.Camera.V4L.Command
-  doctest BB.Camera.V4L.FrameRate
 
   defp options(overrides \\ []) do
     Keyword.merge(
@@ -125,28 +124,16 @@ defmodule BB.Camera.V4L.CommandTest do
       assert argv_pair(command, "-f") == "v4l2"
     end
 
+    test "never lets ffmpeg read stdin, which belongs to MuonTrap" do
+      {:ok, command} = Command.new(options())
+
+      assert "-nostdin" in Command.argv(command)
+    end
+
     test "never produces an argument that is not a plain string" do
       {:ok, command} = Command.new(options(frame_rate: {30_000, 1001}, width: 1280, height: 720))
 
       assert Enum.all?(Command.argv(command), &is_binary/1)
-    end
-  end
-
-  describe "FrameRate" do
-    test "a rational rate is not rounded on the way through" do
-      rate = FrameRate.new!({30_000, 1001})
-
-      assert FrameRate.to_string(rate) == "30000/1001"
-      assert_in_delta FrameRate.to_float(rate), 29.97, 0.001
-    end
-
-    test "a decimal rate becomes the exact rational that was written" do
-      assert FrameRate.new!(29.97) == %FrameRate{numerator: 2997, denominator: 100}
-      assert FrameRate.new!(7.5) == %FrameRate{numerator: 15, denominator: 2}
-    end
-
-    test "reduces to lowest terms" do
-      assert FrameRate.new!({60, 2}) == %FrameRate{numerator: 30, denominator: 1}
     end
   end
 

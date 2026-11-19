@@ -113,12 +113,12 @@ The defaults suit a desktop. On a small target, lower them:
 - `:drop_queue_len` (8) is where frames start being shed because delivery has
   fallen behind. The hub only keeps the newest frame, so a shed frame is one
   no consumer would have seen.
-- `:fail_queue_len` (256) is where the backlog is declared unrecoverable and
-  capture stops instead of growing the mailbox.
+- `:stdio_window` (256 KiB) is how much output ffmpeg may have in flight
+  before it waits for the VM. It bounds what can queue in the capture's
+  mailbox.
 
 Raising `:max_frame_bytes` is the right move for a high-quality 4K camera
-whose frames legitimately exceed the default. Raising `:fail_queue_len` to
-make an overload warning go away is not.
+whose frames legitimately exceed the default.
 
 ## Failure modes
 
@@ -126,6 +126,8 @@ make an overload warning go away is not.
   reports `BB.Error.Hardware.Camera.CaptureFailed`, and the hub publishes
   `EndCapture{reason: :error}`. ffmpeg's own explanation goes to the VM's
   console; read it, it is usually exact.
+- **Device open but silent** — no frame within `:start_timeout_ms` (10 s);
+  ffmpeg is stopped and capture fails with `{:no_frames, ms}`.
 - **Capture is not retried.** Reopening is the consumer's decision, taken by
   subscribing again.
 - **Frames discarded** — a malformed or oversized image is dropped, logged
@@ -134,8 +136,8 @@ make an overload warning go away is not.
 
 ## Don't
 
-- Don't call `BB.Camera.V4L.Capture` or `BB.Camera.V4L.Backend` directly. They
-  are the driver's internals, not an API.
+- Don't start a `BB.Camera.FFmpeg.Capture` for a camera this driver declares.
+  The driver owns its capture.
 - Don't declare a parameter looser than the option it feeds. A parameter typed
   `:integer` will happily store `-1` for `:width`, which this driver's
   `:pos_integer` then refuses — and `handle_options/2` has no way to refuse a
@@ -144,3 +146,10 @@ make an overload warning go away is not.
 - Don't publish frames on pubsub, or put frame bytes in an error.
 - Don't use this on anything but Linux. The platform belongs in the driver,
   not in `bb_camera`'s interface; another platform wants another driver.
+
+## Further reading
+
+- [bb_camera_v4l docs](https://hexdocs.pm/bb_camera_v4l)
+- `BB.Camera.V4L` for the options and the parameters they feed
+- `bb_camera`'s usage rules for the hub, subscriptions and frames
+- `bb_camera_ffmpeg`'s usage rules for the capture this driver runs

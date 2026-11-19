@@ -7,10 +7,10 @@ defmodule BB.Camera.V4LTest do
   # The stub reports to a registered name, which is global.
   use ExUnit.Case, async: false
 
+  alias BB.Camera.FFmpeg.Test.{JpegBuilder, StubBackend}
   alias BB.Camera.Media
   alias BB.Camera.V4L
-  alias BB.Camera.V4L.Command
-  alias BB.Camera.V4L.Test.{JpegBuilder, StubBackend, StubBot}
+  alias BB.Camera.V4L.Test.StubBot
   alias BB.Error.Invalid.Camera.UnknownStreamInfo
   alias BB.Message.Camera.{BeginCapture, EndCapture}
 
@@ -216,8 +216,8 @@ defmodule BB.Camera.V4LTest do
       :ok = StubBackend.exited(stub, 0)
 
       assert_receive {:bb, @topic, %BB.Message{payload: %EndCapture{reason: :driver_stopped}}}
-      assert_receive {:stub_opened, restarted, command}
-      assert "320x480" in Command.argv(command)
+      assert_receive {:stub_opened, restarted, {_executable, args, _opts}}
+      assert "320x480" in args
 
       # And the replacement only claims to be capturing once it really is.
       :ok = StubBackend.feed(restarted, JpegBuilder.build(width: 320, height: 480))
@@ -246,10 +246,10 @@ defmodule BB.Camera.V4LTest do
   describe "the ffmpeg command" do
     test "is built from the declared options without a shell" do
       {:ok, session} = Media.open(StubBot, :eye, format: :jpeg)
-      assert_receive {:stub_opened, _stub, command}
+      assert_receive {:stub_opened, _stub, {executable, argv, _opts}}
 
-      argv = Command.argv(command)
-
+      assert executable == "/nonexistent/ffmpeg"
+      assert "-nostdin" in argv
       assert "/dev/video0" in argv
       assert "640x480" in argv
       assert "30" in argv

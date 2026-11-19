@@ -37,11 +37,20 @@ same camera produce one ffmpeg, not two.
 only — `BeginCapture` and `EndCapture`. Frame bytes go over `bb_camera`'s
 bounded media interface.
 
-## Status
+## Installation
 
-Not yet published. `bb_camera_v4l` and its `bb_camera` dependency are declared
-the way every package here declares `bb` — from Hex by default, and from the
-sibling checkout under `bb_workspace` when `BB_VERSION=local` is set.
+```elixir
+def deps do
+  [
+    {:bb, "~> 0.33"},
+    {:bb_camera, "~> 0.1"},
+    {:bb_camera_v4l, "~> 0.1"}
+  ]
+end
+```
+
+Working on this driver from a `bb_workspace` checkout instead? `BB_VERSION=local`
+resolves `bb` and `bb_camera` from the sibling checkouts rather than from Hex.
 
 ## Requirements
 

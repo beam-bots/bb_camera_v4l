@@ -33,7 +33,7 @@ defmodule BB.Camera.V4L.Command do
   path costs real CPU per frame and is the fallback, not the goal.
   """
 
-  alias BB.Camera.V4L.FrameRate
+  alias BB.Camera.FFmpeg.FrameRate
 
   defstruct [:source, :width, :height, :frame_rate, :input_format, :quality, :executable]
 
@@ -84,7 +84,7 @@ defmodule BB.Camera.V4L.Command do
     accepted sizes here: what a camera supports is a property of the camera,
     and this driver does not enumerate it. Ask for what you want; the frames
     report what you got.
-  - `:frame_rate` — see `BB.Camera.V4L.FrameRate`.
+  - `:frame_rate` — see `BB.Camera.FFmpeg.FrameRate`.
   - `:input_format` — the V4L2 pixel format to request, as ffmpeg names it.
     Default `"mjpeg"`, which is the passthrough path.
   - `:quality` — ffmpeg's `-q:v` for the MJPEG encoder, 1 (best) to 31.
@@ -122,34 +122,29 @@ defmodule BB.Camera.V4L.Command do
   def passthrough?(%__MODULE__{}), do: false
 
   @doc """
-  The device path, or `nil` for a synthetic source.
-  """
-  @spec device(t()) :: String.t() | nil
-  def device(%__MODULE__{source: {:device, path}}), do: path
-  def device(%__MODULE__{}), do: nil
-
-  @doc """
   The argument vector, without the executable itself.
 
       iex> {:ok, command} = BB.Camera.V4L.Command.new(
       ...>   device: "/dev/video0", width: 640, height: 480,
       ...>   frame_rate: 30, executable: "/usr/bin/ffmpeg")
       iex> BB.Camera.V4L.Command.argv(command)
-      ["-hide_banner", "-loglevel", "error", "-f", "v4l2", "-input_format", "mjpeg",
-       "-video_size", "640x480", "-framerate", "30", "-i", "/dev/video0", "-an",
+      ["-nostdin", "-hide_banner", "-loglevel", "error", "-f", "v4l2", "-input_format",
+       "mjpeg", "-video_size", "640x480", "-framerate", "30", "-i", "/dev/video0", "-an",
        "-c:v", "copy", "-f", "mjpeg", "-flush_packets", "1", "pipe:1"]
 
       iex> {:ok, command} = BB.Camera.V4L.Command.new(
       ...>   lavfi: "testsrc2", width: 320, height: 240,
       ...>   frame_rate: 10, executable: "/usr/bin/ffmpeg")
       iex> BB.Camera.V4L.Command.argv(command)
-      ["-hide_banner", "-loglevel", "error", "-re", "-f", "lavfi", "-i",
+      ["-nostdin", "-hide_banner", "-loglevel", "error", "-re", "-f", "lavfi", "-i",
        "testsrc2=size=320x240:rate=10", "-an", "-c:v", "mjpeg", "-q:v", "5",
        "-r", "10", "-f", "mjpeg", "-flush_packets", "1", "pipe:1"]
   """
   @spec argv(t()) :: [String.t()]
   def argv(%__MODULE__{} = command) do
-    ["-hide_banner", "-loglevel", "error"] ++
+    # `-nostdin` because ffmpeg's stdin is MuonTrap's flow-control channel;
+    # see `BB.Camera.FFmpeg.Backend.MuonTrap`.
+    ["-nostdin", "-hide_banner", "-loglevel", "error"] ++
       input_argv(command) ++
       ["-an"] ++
       codec_argv(command) ++

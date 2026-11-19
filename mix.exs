@@ -30,8 +30,7 @@ defmodule BB.Camera.V4L.MixProject do
 
   def application do
     [
-      extra_applications: [:logger],
-      mod: {BB.Camera.V4L.Application, []}
+      extra_applications: [:logger]
     ]
   end
 
@@ -83,6 +82,7 @@ defmodule BB.Camera.V4L.MixProject do
     [
       {:bb, bb_dep("~> 0.33")},
       {:bb_camera, bb_dep("~> 0.1", :bb_camera)},
+      {:bb_camera_ffmpeg, bb_dep("~> 0.1", :bb_camera_ffmpeg)},
 
       # dev/test
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
@@ -91,7 +91,6 @@ defmodule BB.Camera.V4L.MixProject do
       {:ex_doc, ">= 0.0.0", only: [:dev, :test], runtime: false},
       {:git_ops, "~> 2.9", only: [:dev, :test], runtime: false},
       {:igniter, "~> 0.6", only: [:dev, :test], runtime: false},
-      {:mimic, "~> 2.2", only: :test, runtime: false},
       {:usage_rules, "~> 1.2", only: [:dev], runtime: false}
     ]
   end

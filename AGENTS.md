@@ -12,8 +12,12 @@ repository.
 ## Project Overview
 
 `bb_camera_v4l` is a Beam Bots camera driver for Linux V4L2 devices. One
-module, `BB.Camera.V4L`, is both a `BB.Sensor` and a `BB.Camera`; everything
-else in `lib/` exists to make that module's job tractable.
+module, `BB.Camera.V4L`, is both a `BB.Sensor` and a `BB.Camera`;
+`BB.Camera.V4L.Command` builds the ffmpeg argument vector.
+
+Running ffmpeg, flow control, JPEG framing and process cleanup live in
+`bb_camera_ffmpeg`, shared with `bb_camera_avf`. A fix there belongs there,
+not here.
 
 Capture lifecycle is **not** this package's decision. `bb_camera`'s
 `BB.Camera.Hub` refcounts consumers and tells the driver when to start and
@@ -28,7 +32,8 @@ BB_VERSION=local mix test                    # no camera and no ffmpeg needed
 BB_VERSION=local mix test --include ffmpeg   # also runs ffmpeg for real
 ```
 
-`BB_VERSION=local` resolves `bb` and `bb_camera` from the sibling checkouts.
+`BB_VERSION=local` resolves `bb`, `bb_camera` and `bb_camera_ffmpeg` from the
+sibling checkouts.
 
 ## Architecture
 
@@ -36,63 +41,45 @@ BB_VERSION=local mix test --include ffmpeg   # also runs ffmpeg for real
 |---|---|
 | `BB.Camera.V4L` | The driver. Options, lifecycle, and the bridge to `BB.Camera.Hub` |
 | `BB.Camera.V4L.Command` | Builds and validates the ffmpeg argument vector. Pure |
-| `BB.Camera.V4L.FrameRate` | Exact rational frame rates. Pure |
-| `BB.Camera.V4L.Jpeg` | Resumable structural scan of a JPEG stream. Pure |
-| `BB.Camera.V4L.Framer` | Buffer, size caps, resynchronisation. A struct, no process |
-| `BB.Camera.V4L.Capture` | Owns the port and the ingress bounds. One per running capture |
-| `BB.Camera.V4L.Backend` | How capture gets bytes: ffmpeg for real, a stub in tests |
-| `BB.Camera.V4L.Reaper` | Kills orphaned OS processes. Outside every robot |
 
-The split between `Jpeg`, `Framer` and `Capture` is deliberate: the two
-hardest things here are JPEG structure and process lifetime, and neither is
-testable when they are tangled together.
+Everything else is `bb_camera_ffmpeg`: `BB.Camera.FFmpeg.Capture` runs one
+capture, and the driver handles its `{:bb_camera_ffmpeg, pid, event}`
+messages.
 
 ## Things that are easy to get wrong
 
-**Framing is structural, not a marker search.** `FF D9` appears inside EXIF
-thumbnails, which plenty of webcams emit. `BB.Camera.V4L.Jpeg` walks segment
-lengths and entropy-coded data properly. Do not replace it with
-`:binary.match/2` on the end marker.
+**ffmpeg runs under MuonTrap, and that is the cleanup mechanism.** Closing a
+port does not kill the program behind it, nor does killing the port's owner —
+measured on OTP 29, the process was reparented to init. This package used to
+carry a `Reaper` that signalled orphans from inside the VM, checking `/proc`
+start times; it could not act once the VM had halted. MuonTrap is ffmpeg's
+parent and kills it when the VM's end of the pipe closes. See
+`bb_camera_ffmpeg`'s AGENTS.md before changing anything about process
+lifetime.
 
-**Erlang ports have no ingress backpressure.** `Port.open/2`'s
-`busy_limits_msgq` is accepted on OTP 29 and does nothing for port-to-owner
-data; it maps to `erl_drv_busy_msgq_limits`, which governs the other
-direction. Measured: a `cat /dev/zero` port queues gigabytes into the owner's
-mailbox in seconds with the limits set. The bounds in `Capture` are the only
-thing standing between a fast producer and the VM — and they are **fail-fast,
-not a memory bound**: `fail_queue_len` counts reads this process has observed,
-which it can only do when scheduled, and `max_frame_bytes` caps one image
-rather than a byte rate. The mailbox depth is checked on every read, before
-framing, because a producer whose bytes never complete a frame would otherwise
-never reach the check. Do not write documentation claiming a calculable memory
-ceiling.
+**`-nostdin` is not optional.** ffmpeg's stdin is MuonTrap's flow-control
+channel. `Command.argv/1` always emits it, and `bb_camera_ffmpeg` refuses to
+start ffmpeg without it. It also means ffmpeg is stopped with `SIGTERM`, not
+with `q`.
 
-**Closing a port does not kill the program behind it.** Nor does killing the
-port's owner. Measured on OTP 29 for `Port.close/1`, `Process.exit(owner,
-:kill)` and an owner crash: the process survived all three and was reparented
-to init. It usually dies of `SIGPIPE` on its next write to the dead pipe,
-which is exactly what does not happen when a camera has wedged. `Reaper` is
-not belt-and-braces; it is the mechanism.
-
-**Capture is confirmed on the first whole image, not on `Port.open/2`
-returning.** ffmpeg existing says nothing about whether the device opened — it
-reports that by exiting non-zero a moment later. `Capture` holds its first
-frame and sends `{:ready, info}`; the driver confirms to the hub and then
-releases it with `Capture.go/1`. Confirming earlier announces `BeginCapture`
-for cameras that are about to fail.
+**Capture is confirmed on the first whole image, not on ffmpeg starting.**
+ffmpeg existing says nothing about whether the device opened — it reports that
+by exiting non-zero a moment later. The driver confirms to the hub on
+`{:ready, info}` and then releases the held frame with `Capture.go/1`.
+Confirming earlier announces `BeginCapture` for cameras that are about to
+fail.
 
 **Only one ffmpeg may hold the device, so stop and start are a sequence.** A
 capture that has been asked to stop keeps its identity in `:stopping` until
 its real exit arrives, and whatever wanted to happen next waits in `:pending`.
-`Capture` likewise stays alive until the port reports an exit status, and exits
-`{:shutdown, :teardown_unconfirmed}` when even `SIGKILL` produced none — in
-which case the driver refuses the replacement rather than opening a second
-ffmpeg against a device the first may still hold. Do not "simplify" this by
-forgetting the old capture and starting a new one.
+A capture that exits `{:shutdown, :teardown_unconfirmed}` may still hold the
+device, so the driver refuses the replacement rather than opening a second
+ffmpeg against it. Do not "simplify" this by forgetting the old capture and
+starting a new one.
 
-**`Hub.deliver/2` is synchronous and must stay that way.** It is the ingress
-bound between this package and `bb_camera`. Wrapping it in a `Task` would
-reintroduce the unbounded queue it exists to prevent.
+**`Hub.deliver/2` is synchronous and must stay that way.** It is the delivery
+bound between `bb_camera_ffmpeg` and `bb_camera`. Wrapping it in a `Task`
+would reintroduce the unbounded queue it exists to prevent.
 
 **Reconfiguring is `handle_options/2`, and there is no second channel.** This
 driver once had a `settings_schema/0` holding `width`, `height` and
@@ -138,26 +125,22 @@ driver does not enumerate device capabilities, and
 
 ## Testing
 
-Tests drive capture through `BB.Camera.V4L.Test.StubBackend`, which delivers
-exactly the bytes a test asks for, exactly when it asks. JPEG fixtures come
-from `BB.Camera.V4L.Test.JpegBuilder`, which builds structurally valid images
-with stuffed bytes, restart markers, fill bytes and embedded thumbnails on
-demand.
+The test robot declares `BB.Camera.FFmpeg.Test.StubBackend` as its backend,
+and tests feed it images from `BB.Camera.FFmpeg.Test.JpegBuilder`. Both ship
+in `bb_camera_ffmpeg`'s `lib` for exactly this.
 
-**No test sleeps, and no timed negative assertions.** Backpressure cases use a
-gated sink that blocks until the test releases it, so a backlog is arranged
-rather than raced for. To show something did *not* happen, push a synchronous
-call through the process first and then use `refute_received`. Observing an OS
-process exit — which the BEAM cannot wait on for a process that is not its
-child — borrows an event from `tail --pid` behind a port.
+**No test sleeps, and no timed negative assertions.** To show something did
+*not* happen, push a synchronous call through the process first and then use
+`refute_received`.
+
+Tests tagged `:linux` need ffmpeg's V4L2 input and are excluded on other
+systems by `test/test_helper.exs`.
 
 ## Dependencies
 
 - `bb` — the framework
 - `bb_camera` — the `BB.Camera` behaviour, hub, frame and error types
-
-There is no NIF and no port driver: ffmpeg is an ordinary executable behind an
-ordinary port.
+- `bb_camera_ffmpeg` — ffmpeg under MuonTrap, flow control and JPEG framing
 
 ## Licensing headers
 

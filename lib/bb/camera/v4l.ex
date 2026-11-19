@@ -74,12 +74,11 @@ defmodule BB.Camera.V4L do
 
   ## Limitations
 
-  - **Linux only.** It drives V4L2 through ffmpeg and identifies processes
-    through `/proc`.
+  - **Linux only.** It drives V4L2 through ffmpeg.
   - **Timestamps are arrival times.** The raw MJPEG stream carries no
     timestamps of its own, so a frame is stamped when the read completing it
-    reached the BEAM. See `BB.Camera.V4L.Capture` for what that does and does
-    not mean.
+    reached the BEAM. See `BB.Camera.FFmpeg.Capture` for what that does and
+    does not mean.
   - **A failed capture is not retried.** The failure is reported and capture
     ends; reopening the device is the consumer's decision, taken by subscribing
     again. A driver that quietly reopened hardware on its own would be claiming
@@ -98,8 +97,9 @@ defmodule BB.Camera.V4L do
   import BB.Unit
   import BB.Unit.Option
 
+  alias BB.Camera.FFmpeg.{Capture, FrameRate}
   alias BB.Camera.{Frame, Hub, StreamInfo}
-  alias BB.Camera.V4L.{Capture, Command, FrameRate}
+  alias BB.Camera.V4L.Command
   alias BB.Error.Hardware.Camera.CaptureFailed
 
   require Logger
@@ -136,7 +136,7 @@ defmodule BB.Camera.V4L do
       frame_rate: [
         type: FrameRate.option_type(),
         default: 30,
-        doc: "Frames per second to ask the device for; see `BB.Camera.V4L.FrameRate`"
+        doc: "Frames per second to ask the device for; see `BB.Camera.FFmpeg.FrameRate`"
       ],
       input_format: [
         type: {:or, [:atom, :string]},
@@ -161,36 +161,44 @@ defmodule BB.Camera.V4L do
       max_frame_bytes: [
         type: :pos_integer,
         default: 4 * 1024 * 1024,
-        doc: "Largest frame to accept. See `BB.Camera.V4L.Framer`"
+        doc: "Largest frame to accept. See `BB.Camera.FFmpeg.Framer`"
       ],
       drop_queue_len: [
         type: :pos_integer,
         default: 8,
-        doc: "Shed frames above this capture mailbox depth"
+        doc: "Shed frames while more reads than this are waiting"
       ],
-      fail_queue_len: [
+      stdio_window: [
         type: :pos_integer,
-        default: 256,
-        doc: "Stop capture above this mailbox depth"
+        default: 256 * 1024,
+        doc: "Bytes of output ffmpeg may have in flight before they are acknowledged"
+      ],
+      start_timeout_ms: [
+        type: :pos_integer,
+        default: 10_000,
+        doc: """
+        How long to wait for the first frame before failing capture. A wedged
+        device can leave ffmpeg open and silent. See `BB.Camera.FFmpeg.Capture`
+        """
       ],
       stop_timeout_ms: [
         type: :non_neg_integer,
         default: 2_000,
-        doc: "How long ffmpeg gets to exit on its own before it is signalled"
+        doc: "How long ffmpeg gets to exit on `SIGTERM` before it is sent `SIGKILL`"
       ],
       backend: [
-        type: {:behaviour, BB.Camera.V4L.Backend},
-        default: BB.Camera.V4L.Backend.FFmpeg,
+        type: {:behaviour, BB.Camera.FFmpeg.Backend},
+        default: BB.Camera.FFmpeg.Backend.MuonTrap,
         doc: """
-        What produces the bytes. The default runs ffmpeg; tests declare
-        `BB.Camera.V4L.Test.StubBackend` here to drive capture read by read
-        without a device.
+        What produces the bytes. The default runs ffmpeg under MuonTrap; tests
+        declare `BB.Camera.FFmpeg.Test.StubBackend` here to drive capture read
+        by read without a device.
         """
       ],
       backend_opts: [
         type: :keyword_list,
         default: [],
-        doc: "Passed to the backend's `open/2`"
+        doc: "Passed to the backend's `open/3`"
       ]
     )
   end
@@ -260,10 +268,10 @@ defmodule BB.Camera.V4L do
   def handle_info({:bb_camera, :stop_capture}, state),
     do: {:noreply, request_stop(state, :driver_stopped)}
 
-  def handle_info({:bb_camera_v4l, capture, {:ready, info}}, %{capture: capture} = state),
+  def handle_info({:bb_camera_ffmpeg, capture, {:ready, info}}, %{capture: capture} = state),
     do: {:noreply, confirm(state, info)}
 
-  def handle_info({:bb_camera_v4l, capture, event}, %{capture: capture} = state),
+  def handle_info({:bb_camera_ffmpeg, capture, event}, %{capture: capture} = state),
     do: {:noreply, handle_capture_event(state, event)}
 
   def handle_info({:EXIT, capture, reason}, %{stopping: capture} = state) do
@@ -431,7 +439,8 @@ defmodule BB.Camera.V4L do
 
     opts =
       [
-        command: state.command,
+        args: Command.argv(state.command),
+        executable: state.command.executable,
         notify: self(),
         sequence_start: state.sequence,
         sink: fn frame -> deliver(hub, state.stream_info, dimensions, frame) end
@@ -516,8 +525,11 @@ defmodule BB.Camera.V4L do
     state
   end
 
-  defp handle_capture_event(state, {:overloaded, queue_len}) do
-    Logger.error("#{inspect(camera_name(state))} capture overloaded at #{queue_len} queued reads")
+  defp handle_capture_event(state, {:no_frames, timeout_ms}) do
+    Logger.warning(
+      "#{inspect(camera_name(state))} produced no frame within #{timeout_ms}ms; " <>
+        "ffmpeg's console output above says why, if it knows"
+    )
 
     state
   end
@@ -561,8 +573,9 @@ defmodule BB.Camera.V4L do
       :backend,
       :backend_opts,
       :drop_queue_len,
-      :fail_queue_len,
       :max_frame_bytes,
+      :start_timeout_ms,
+      :stdio_window,
       :stop_timeout_ms
     ]
 

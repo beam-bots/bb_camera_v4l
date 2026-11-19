@@ -50,14 +50,18 @@ end
 ```
 
 Working on this driver from a `bb_workspace` checkout instead? `BB_VERSION=local`
-resolves `bb` and `bb_camera` from the sibling checkouts rather than from Hex.
+resolves `bb`, `bb_camera` and `bb_camera_ffmpeg` from the sibling checkouts
+rather than from Hex.
 
 ## Requirements
 
-- **Linux.** This driver speaks V4L2 and identifies OS processes through
-  `/proc`. Cameras on other platforms want a different driver behind the same
-  `BB.Camera` interface.
+- **Linux.** This driver speaks V4L2. Cameras on other platforms want a
+  different driver behind the same `BB.Camera` interface — on macOS,
+  [`bb_camera_avf`](https://github.com/beam-bots/bb_camera_avf).
 - **ffmpeg** on `$PATH`.
+- **A C compiler at build time**, for MuonTrap's wrapper program — see
+  [`bb_camera_ffmpeg`](https://github.com/beam-bots/bb_camera_ffmpeg). Nerves
+  toolchains have one.
 - **Read access to the device node**, which on Debian means membership of the
   `video` group.
 
@@ -281,7 +285,7 @@ Open a second one, and count the ffmpeg processes:
 
 ```sh
 pgrep -ax ffmpeg
-#=> 2193841 /usr/bin/ffmpeg -hide_banner -loglevel error -f v4l2 -input_format mjpeg ...
+#=> 2193841 /usr/bin/ffmpeg -nostdin -hide_banner -loglevel error -f v4l2 -input_format mjpeg ...
 ```
 
 One line. Both consumers are reading the same capture.
@@ -310,7 +314,8 @@ goes out.
 This is worth checking rather than assuming. Closing an Erlang port does *not*
 kill the program behind it, and neither does killing the port's owner — both
 were measured, and in both cases the process survived and was reparented to
-init. A separate reaper signals it, which is why there is nothing left here.
+init. ffmpeg runs under MuonTrap, which kills it when the VM's end of the pipe
+closes for any reason, which is why there is nothing left here.
 
 ## A preview in a browser
 
@@ -337,33 +342,30 @@ its permissions, and this README is where that is worked through.
 | `:quality` | `5` | ffmpeg's `-q:v`, 1 (best) to 31. Only used when encoding |
 | `:ffmpeg` | `$PATH` | Path to the ffmpeg executable |
 | `:max_frame_bytes` | 4 MiB | Largest frame accepted before the stream is resynchronised |
-| `:drop_queue_len` | `8` | Shed frames above this capture mailbox depth |
-| `:fail_queue_len` | `256` | Stop capture above this mailbox depth |
-| `:stop_timeout_ms` | `2000` | How long ffmpeg gets to exit before it is signalled |
+| `:drop_queue_len` | `8` | Shed frames while more reads than this are waiting |
+| `:stdio_window` | 256 KiB | Bytes of output ffmpeg may have in flight unacknowledged |
+| `:start_timeout_ms` | `10000` | Fail capture when no frame has arrived by then |
+| `:stop_timeout_ms` | `2000` | How long ffmpeg gets after `SIGTERM` before `SIGKILL` |
 
 ## How it holds together
 
 ```
-ffmpeg ──pipe──> Capture ──frames──> BB.Camera.Hub ──> consumers
-                    │                     │
-                    │                     └─ lifecycle ──> BB.PubSub
-                    └─ os pid ──> Reaper
+MuonTrap ──> ffmpeg ──pipe──> Capture ──frames──> BB.Camera.Hub ──> consumers
+                                                       │
+                                                       └─ lifecycle ──> BB.PubSub
 ```
 
 - **`BB.Camera.V4L.Command`** builds the argument vector and validates it.
-  `Port.open/2` with `:spawn_executable` calls `execve` directly, so no shell
-  ever parses a device path.
-- **`BB.Camera.V4L.Jpeg`** walks the JPEG marker structure rather than
-  searching for `FF D9`, which is wrong for any camera that embeds an EXIF
-  thumbnail, and reads the real dimensions out of the frame header on the way
-  past.
-- **`BB.Camera.V4L.Framer`** holds the partial frame between reads, with hard
-  size caps and one resynchronisation path for everything malformed.
-- **`BB.Camera.V4L.Capture`** owns the port and the bounds. Erlang ports have
-  no ingress flow control, so it sheds frames when it falls behind and stops
-  rather than letting its mailbox grow without limit.
-- **`BB.Camera.V4L.Reaper`** kills the OS process when whatever owned it dies,
-  checking `/proc` start times first so a recycled pid is never signalled.
+  No shell ever parses a device path.
+- **[`bb_camera_ffmpeg`](https://github.com/beam-bots/bb_camera_ffmpeg)** does
+  the rest, shared with `bb_camera_avf`:
+  - it runs ffmpeg under MuonTrap, so ffmpeg cannot outlive the capture, its
+    owner or the VM;
+  - it flow-controls ffmpeg's output, so what can queue in the VM is bounded;
+  - it frames the JPEG stream by walking its marker structure, not by
+    searching for `FF D9`, which is wrong for any camera that embeds an EXIF
+    thumbnail;
+  - it holds the first frame until the hub has been told capture started.
 
 ## Limitations
 
@@ -392,12 +394,6 @@ ffmpeg ──pipe──> Capture ──frames──> BB.Camera.Hub ──> consu
   confirmed gone before the new one is started, and if its teardown cannot be
   confirmed the replacement is refused rather than left to contend for the
   device.
-- **The ingress limits are fail-fast, not a memory bound.** `fail_queue_len`
-  counts queued reads this driver has *observed*, and it only observes them
-  when it is scheduled; a starved process accumulates messages without running
-  the check, and the port keeps reading regardless. What the limits buy is that
-  a sustained overload is noticed and reported rather than silently eating
-  memory.
 - **ffmpeg's diagnostics go to the VM's console**, not into the error, because
   merging its stderr into its stdout would corrupt every frame.
 - **JPEG only.** Interframe codecs are refused rather than carried; see
@@ -414,13 +410,15 @@ BB_VERSION=local mix check --no-retry
 
 `BB_VERSION=local` goes on every command, including `deps.get`.
 
-The default suite drives capture through an injected backend, so every case —
-a frame split across reads, a truncated image, an unexpected exit status, a
-consumer falling behind — is a function call rather than something to wait
-for. No test sleeps.
+The default suite drives the driver through `bb_camera_ffmpeg`'s stub
+backend, so every lifecycle case — a capture that fails, a stop racing a
+start, a parameter change mid-stream — is a function call rather than
+something to wait for. No test sleeps. Framing, flow control and process
+cleanup are tested in `bb_camera_ffmpeg`.
 
-The `:ffmpeg` tagged tests run the whole real path against a synthetic ffmpeg
-source. They need ffmpeg, but no camera.
+The `:ffmpeg` tagged tests run this driver's own argument vector through real
+ffmpeg against a synthetic source. They need ffmpeg, but no camera. The one
+also tagged `:linux` needs ffmpeg's V4L2 input and is skipped elsewhere.
 
 ## Licence
 

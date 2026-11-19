@@ -4,7 +4,7 @@
 
 defmodule BB.Camera.V4L.Test.StubBot do
   @moduledoc """
-  A robot whose camera is driven by `BB.Camera.V4L.Test.StubBackend`.
+  A robot whose camera is driven by `BB.Camera.FFmpeg.Test.StubBackend`.
 
   Everything but the bytes is real: the real driver, the real hub, the real
   framer and the real capture bounds. Only the thing that would have been
@@ -41,7 +41,7 @@ defmodule BB.Camera.V4L.Test.StubBot do
          height: 480,
          frame_rate: 30,
          ffmpeg: "/nonexistent/ffmpeg",
-         backend: BB.Camera.V4L.Test.StubBackend,
+         backend: BB.Camera.FFmpeg.Test.StubBackend,
          backend_opts: [report_to: :bb_camera_v4l_stub_observer]}
       )
     end

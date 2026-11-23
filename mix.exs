@@ -6,7 +6,7 @@ defmodule BB.Camera.V4L.MixProject do
   use Mix.Project
 
   @moduledoc """
-  Beam Bots camera driver for Linux V4L2 devices, capturing MJPEG via ffmpeg.
+  Beam Bots camera driver for Linux V4L2 devices, delivering raw frames via ffmpeg.
   """
 
   @version "0.2.0"

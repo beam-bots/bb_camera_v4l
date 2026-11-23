@@ -7,8 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 # BB.Camera.V4L Usage Rules
 
 `bb_camera_v4l` provides `BB.Camera.V4L`, a camera driver for Linux V4L2
-devices for [Beam Bots](https://hexdocs.pm/bb). It captures MJPEG through a
-supervised ffmpeg process and serves frames through `bb_camera`. For framework
+devices for [Beam Bots](https://hexdocs.pm/bb). It captures through a
+supervised ffmpeg process, which decodes to raw `{:raw, :I420}` frames, and
+serves them through `bb_camera`. For framework
 basics see `bb`'s rules; for the consumer-facing API see `bb_camera`'s. This
 file covers only what is specific to this driver.
 
@@ -24,8 +25,8 @@ file covers only what is specific to this driver.
    and periodic capture state only. Frame bytes travel over `BB.Camera.Media` or
    `BB.Camera.subscribe/3`.
 4. **What a camera supports is the camera's business.** This driver does not
-   enumerate formats or sizes. Ask for what you want and read back what you
-   got.
+   enumerate formats or sizes. Ask for one the camera lists: every frame is
+   the size you asked for, scaled if the camera chose another.
 
 ## Wiring it in
 
@@ -47,7 +48,7 @@ end
 Then consume it through `bb_camera`:
 
 ```elixir
-{:ok, session} = BB.Camera.Media.open(MyRobot, :eye, format: :jpeg)
+{:ok, session} = BB.Camera.Media.open(MyRobot, :eye, format: {:raw, :I420})
 {:ok, frame} = BB.Camera.Media.next(session, 5_000)
 BB.Camera.Media.close(session)
 ```
@@ -64,11 +65,13 @@ v4l2-ctl -d /dev/video0 --list-formats-ext
 A webcam usually claims two `/dev/video*` nodes and only the first captures.
 
 If `MJPG` appears, pick a size and rate listed under it and leave
-`input_format` alone — ffmpeg copies the camera's own JPEGs through without
-re-encoding, which costs almost no CPU at any resolution.
+`input_format` alone — over USB 2 it is usually the only way to get a high
+frame rate. If only `YUYV` appears, set `input_format: :yuyv422`.
 
-If only `YUYV` appears, set `input_format: :yuyv422`. ffmpeg will encode, which
-costs real CPU per frame and makes `:quality` matter.
+Either way ffmpeg decodes to full-range I420 at exactly `:width` x `:height`,
+which costs CPU per frame. Both must be even: I420 halves the chroma in each
+direction, and an odd size is refused with
+`BB.Error.Invalid.Camera.UnsupportedFormat` when the options are read.
 
 Reading the device needs membership of the `video` group on Debian:
 
@@ -92,9 +95,11 @@ from `30000/1001` and this driver will faithfully ask for the one you wrote.
 
 ## What the driver claims to know
 
-- `width` and `height` on a frame, and on `BB.Camera.stream_info/2` once
-  capture has produced something, are read from the JPEG's own frame header.
-  They are what the camera encoded, which may not be what you asked for.
+- `width` and `height` on a frame and in `BB.Camera.stream_info/2` are the
+  ones you asked for, always. If the camera negotiates a different size,
+  ffmpeg scales it to the requested one — stretching it if the aspect ratio
+  differs — because raw frames carry no size of their own and ffmpeg's console
+  output, which would say what was negotiated, is not captured.
 - `frame_rate` in `stream_info` is the rate that was *asked for*. This driver
   does not query the device's rate back, so it does not claim to know it.
 
@@ -108,17 +113,12 @@ often that is published, `~u(1 hertz)` by default.
 
 The defaults suit a desktop. On a small target, lower them:
 
-- `:max_frame_bytes` (4 MiB) caps a single frame and, with it, what a broken
-  stream can make the framer hold.
 - `:drop_queue_len` (8) is where frames start being shed because delivery has
   fallen behind. The hub only keeps the newest frame, so a shed frame is one
   no consumer would have seen.
 - `:stdio_window` (256 KiB) is how much output ffmpeg may have in flight
   before it waits for the VM. It bounds what can queue in the capture's
   mailbox.
-
-Raising `:max_frame_bytes` is the right move for a high-quality 4K camera
-whose frames legitimately exceed the default.
 
 ## Failure modes
 
@@ -130,9 +130,6 @@ whose frames legitimately exceed the default.
   ffmpeg is stopped and capture fails with `{:no_frames, ms}`.
 - **Capture is not retried.** Reopening is the consumer's decision, taken by
   subscribing again.
-- **Frames discarded** — a malformed or oversized image is dropped, logged
-  with a byte count and a reason, and the stream resynchronises on the next
-  image.
 
 ## Don't
 

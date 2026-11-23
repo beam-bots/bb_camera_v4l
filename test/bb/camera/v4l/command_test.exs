@@ -7,6 +7,7 @@ defmodule BB.Camera.V4L.CommandTest do
   use ExUnit.Case, async: true
 
   alias BB.Camera.V4L.Command
+  alias BB.Error.Invalid.Camera.UnsupportedFormat
 
   doctest BB.Camera.V4L.Command
 
@@ -24,15 +25,29 @@ defmodule BB.Camera.V4L.CommandTest do
   end
 
   describe "new/1" do
-    test "accepts arbitrary positive dimensions" do
-      assert {:ok, command} = Command.new(options(width: 1, height: 1))
-      assert {command.width, command.height} == {1, 1}
+    test "accepts arbitrary positive even dimensions" do
+      assert {:ok, command} = Command.new(options(width: 2, height: 2))
+      assert {command.width, command.height} == {2, 2}
 
       assert {:ok, command} = Command.new(options(width: 3840, height: 2160))
       assert {command.width, command.height} == {3840, 2160}
 
-      assert {:ok, command} = Command.new(options(width: 1234, height: 567))
-      assert "1234x567" in Command.argv(command)
+      assert {:ok, command} = Command.new(options(width: 1234, height: 566))
+      assert "1234x566" in Command.argv(command)
+    end
+
+    test "rejects odd dimensions, which I420 cannot take" do
+      assert {:error, %UnsupportedFormat{reason: :invalid_dimensions, width: 641}} =
+               Command.new(options(width: 641))
+
+      assert {:error, %UnsupportedFormat{reason: :invalid_dimensions, height: 481}} =
+               Command.new(options(height: 481))
+    end
+
+    test "knows the size of one frame of what it writes" do
+      assert {:ok, command} = Command.new(options(width: 1280, height: 720))
+      assert command.frame_bytes == div(1280 * 720 * 3, 2)
+      assert Command.format() == {:raw, :I420}
     end
 
     test "rejects dimensions that are not positive integers" do
@@ -91,36 +106,32 @@ defmodule BB.Camera.V4L.CommandTest do
         assert {:ok, _command} = Command.new(options(input_format: format))
       end
     end
-
-    test "rejects a quality outside ffmpeg's range" do
-      assert {:error, {:invalid_quality, 0}} = Command.new(options(quality: 0))
-      assert {:error, {:invalid_quality, 32}} = Command.new(options(quality: 32))
-    end
   end
 
   describe "argv/1" do
-    test "copies packets through when the camera is asked for MJPEG" do
-      {:ok, command} = Command.new(options())
+    test "forces full-range I420 at the configured size, whatever the camera sends" do
+      for input_format <- [:mjpeg, :yuyv422] do
+        {:ok, command} =
+          Command.new(options(input_format: input_format, width: 1280, height: 720))
 
-      assert Command.passthrough?(command)
-      assert argv_pair(command, "-c:v") == "copy"
-      refute "-q:v" in Command.argv(command)
+        assert argv_pair(command, "-input_format") == Atom.to_string(input_format)
+        assert argv_pair(command, "-vf") == "scale=1280:720:out_range=full,format=yuv420p"
+      end
     end
 
-    test "encodes when the camera is asked for anything else" do
-      {:ok, command} = Command.new(options(input_format: :yuyv422, quality: 7))
-
-      refute Command.passthrough?(command)
-      assert argv_pair(command, "-c:v") == "mjpeg"
-      assert argv_pair(command, "-q:v") == "7"
-      assert argv_pair(command, "-r") == "30"
-    end
-
-    test "writes to stdout, never to a file" do
+    test "never invents frames to hold a constant rate" do
       {:ok, command} = Command.new(options())
       argv = Command.argv(command)
 
-      assert List.last(argv) == "pipe:1"
+      assert argv_pair(command, "-fps_mode") == "passthrough"
+      refute "-r" in argv
+    end
+
+    test "writes raw video to stdout, never to a file" do
+      {:ok, command} = Command.new(options())
+      argv = Command.argv(command)
+
+      assert Enum.take(argv, -5) == ["-f", "rawvideo", "-flush_packets", "1", "pipe:1"]
       assert argv_pair(command, "-f") == "v4l2"
     end
 

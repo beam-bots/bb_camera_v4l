@@ -21,29 +21,39 @@ defmodule BB.Camera.V4L.Command do
   path beginning with `-` that ffmpeg would read as a flag, a format name that
   is not a format name.
 
-  ## Passthrough versus transcode
+  ## What comes out
 
-  When the camera is asked for MJPEG, the stream is already a sequence of JPEG
-  images, and ffmpeg copies packets through without touching them: no decode,
-  no re-encode, no quality loss, and almost no CPU. That is the intended path
-  and the default.
+  Always raw I420 (ffmpeg's `yuv420p`), full-range, at exactly `:width` x
+  `:height`, whatever the camera sends. Raw video doesn't describe itself, and
+  ffmpeg's console output is not captured, so nothing downstream could find
+  out what ffmpeg actually produced; the output size and pixel format are
+  forced by the scale filter instead, and the driver sizes frames from the
+  same numbers.
 
-  When it is asked for anything else — `yuyv422` on a camera with no MJPEG
-  mode — ffmpeg has to encode, and `:quality` starts to matter. The encoded
-  path costs real CPU per frame and is the fallback, not the goal.
+  If the device hands back a different size than it was asked for, ffmpeg
+  scales it to the requested one, stretching it if the aspect ratio differs.
+  Consistent frames are worth more here than the device's native geometry.
+
+  `:input_format` chooses only what the camera sends. MJPEG, the default, is
+  usually the only way to get a high frame rate over USB 2; ffmpeg decodes it
+  either way.
   """
 
   alias BB.Camera.FFmpeg.FrameRate
+  alias BB.Camera.Format
+  alias BB.Error.Invalid.Camera.UnsupportedFormat
 
-  defstruct [:source, :width, :height, :frame_rate, :input_format, :quality, :executable]
+  # `yuv420p` in the argument vector is ffmpeg's name for I420.
+  @format {:raw, :I420}
+
+  defstruct [:source, :width, :height, :frame_rate, :input_format, :frame_bytes, :executable]
 
   @typedoc """
   Where the frames come from.
 
   `{:device, path}` is a real camera. `{:lavfi, filter}` is one of ffmpeg's own
-  synthetic sources, which produces a genuine MJPEG stream through the real
-  encoder and the real pipe without any hardware — useful for proving the
-  pipeline works before blaming the camera.
+  synthetic sources, which runs the real scaler and the real pipe without any
+  hardware — useful for proving the pipeline works before blaming the camera.
   """
   @type source :: {:device, String.t()} | {:lavfi, String.t()}
 
@@ -53,7 +63,7 @@ defmodule BB.Camera.V4L.Command do
           height: pos_integer(),
           frame_rate: FrameRate.t(),
           input_format: String.t(),
-          quality: pos_integer(),
+          frame_bytes: pos_integer(),
           executable: String.t()
         }
 
@@ -62,10 +72,10 @@ defmodule BB.Camera.V4L.Command do
           | {:invalid_dimension, term()}
           | {:invalid_frame_rate, term()}
           | {:invalid_input_format, term()}
-          | {:invalid_quality, term()}
           | {:invalid_lavfi_source, term()}
           | {:no_source, term()}
           | {:ffmpeg_not_found, term()}
+          | UnsupportedFormat.t()
 
   @format_pattern ~r/\A[a-z0-9_]+\z/
 
@@ -80,15 +90,15 @@ defmodule BB.Camera.V4L.Command do
     instead of a device. Only the bare filter name is accepted; the size and
     rate are filled in from `:width`, `:height` and `:frame_rate`, so there is
     one source of truth for them and no filtergraph to get wrong.
-  - `:width`, `:height` — any positive pixel dimensions. There is no list of
-    accepted sizes here: what a camera supports is a property of the camera,
-    and this driver does not enumerate it. Ask for what you want; the frames
-    report what you got.
+  - `:width`, `:height` — positive, even pixel dimensions; I420 halves both
+    for its chroma planes, so an odd one is refused with
+    `BB.Error.Invalid.Camera.UnsupportedFormat`. There is no list of accepted
+    sizes here: what a camera supports is a property of the camera, and this
+    driver does not enumerate it. These are also the size of every frame
+    written, whatever the camera sends.
   - `:frame_rate` — see `BB.Camera.FFmpeg.FrameRate`.
   - `:input_format` — the V4L2 pixel format to request, as ffmpeg names it.
-    Default `"mjpeg"`, which is the passthrough path.
-  - `:quality` — ffmpeg's `-q:v` for the MJPEG encoder, 1 (best) to 31.
-    Ignored on the passthrough path. Default `5`.
+    Default `"mjpeg"`.
   - `:executable` — path to ffmpeg. Defaults to whatever is on `$PATH`.
   """
   @spec new(keyword()) :: {:ok, t()} | {:error, error()}
@@ -98,7 +108,7 @@ defmodule BB.Camera.V4L.Command do
          {:ok, height} <- validate_dimension(Keyword.get(opts, :height)),
          {:ok, frame_rate} <- validate_frame_rate(Keyword.get(opts, :frame_rate)),
          {:ok, input_format} <- validate_input_format(Keyword.get(opts, :input_format, "mjpeg")),
-         {:ok, quality} <- validate_quality(Keyword.get(opts, :quality, 5)),
+         {:ok, frame_bytes} <- Format.frame_size(@format, width, height),
          {:ok, executable} <- validate_executable(Keyword.get(opts, :executable)) do
       {:ok,
        %__MODULE__{
@@ -107,19 +117,17 @@ defmodule BB.Camera.V4L.Command do
          height: height,
          frame_rate: frame_rate,
          input_format: input_format,
-         quality: quality,
+         frame_bytes: frame_bytes,
          executable: executable
        }}
     end
   end
 
   @doc """
-  Is this command copying JPEG packets through rather than encoding them?
+  The format every command writes: full-range I420.
   """
-  @spec passthrough?(t()) :: boolean()
-  def passthrough?(%__MODULE__{source: {:lavfi, _filter}}), do: false
-  def passthrough?(%__MODULE__{input_format: "mjpeg"}), do: true
-  def passthrough?(%__MODULE__{}), do: false
+  @spec format() :: Format.t()
+  def format, do: @format
 
   @doc """
   The argument vector, without the executable itself.
@@ -130,15 +138,17 @@ defmodule BB.Camera.V4L.Command do
       iex> BB.Camera.V4L.Command.argv(command)
       ["-nostdin", "-hide_banner", "-loglevel", "error", "-f", "v4l2", "-input_format",
        "mjpeg", "-video_size", "640x480", "-framerate", "30", "-i", "/dev/video0", "-an",
-       "-c:v", "copy", "-f", "mjpeg", "-flush_packets", "1", "pipe:1"]
+       "-vf", "scale=640:480:out_range=full,format=yuv420p", "-fps_mode", "passthrough",
+       "-f", "rawvideo", "-flush_packets", "1", "pipe:1"]
 
       iex> {:ok, command} = BB.Camera.V4L.Command.new(
       ...>   lavfi: "testsrc2", width: 320, height: 240,
       ...>   frame_rate: 10, executable: "/usr/bin/ffmpeg")
       iex> BB.Camera.V4L.Command.argv(command)
       ["-nostdin", "-hide_banner", "-loglevel", "error", "-re", "-f", "lavfi", "-i",
-       "testsrc2=size=320x240:rate=10", "-an", "-c:v", "mjpeg", "-q:v", "5",
-       "-r", "10", "-f", "mjpeg", "-flush_packets", "1", "pipe:1"]
+       "testsrc2=size=320x240:rate=10", "-an", "-vf",
+       "scale=320:240:out_range=full,format=yuv420p", "-fps_mode", "passthrough",
+       "-f", "rawvideo", "-flush_packets", "1", "pipe:1"]
   """
   @spec argv(t()) :: [String.t()]
   def argv(%__MODULE__{} = command) do
@@ -147,8 +157,7 @@ defmodule BB.Camera.V4L.Command do
     ["-nostdin", "-hide_banner", "-loglevel", "error"] ++
       input_argv(command) ++
       ["-an"] ++
-      codec_argv(command) ++
-      ["-f", "mjpeg", "-flush_packets", "1", "pipe:1"]
+      output_argv(command)
   end
 
   defp input_argv(%__MODULE__{source: {:device, path}} = command) do
@@ -180,21 +189,23 @@ defmodule BB.Camera.V4L.Command do
   # `-flush_packets 1` keeps ffmpeg from holding finished frames in its output
   # buffer waiting for more; without it a low-rate camera's frames arrive in
   # lumps and the measured latency is the buffer, not the camera.
-  defp codec_argv(%__MODULE__{} = command) do
-    if passthrough?(command) do
-      ["-c:v", "copy"]
-    else
-      # Re-encoding is the only path where ffmpeg controls the output rate, so
-      # it is the only path where capping it means anything.
-      [
-        "-c:v",
-        "mjpeg",
-        "-q:v",
-        Integer.to_string(command.quality),
-        "-r",
-        FrameRate.to_string(command.frame_rate)
-      ]
-    end
+  #
+  # `-fps_mode passthrough` because the rawvideo muxer otherwise defaults to a
+  # constant rate, duplicating frames to fill any gap the camera leaves. A
+  # duplicate would reach the hub as a new frame with a new timestamp, claiming
+  # a capture that never happened.
+  defp output_argv(%__MODULE__{} = command) do
+    [
+      "-vf",
+      "scale=#{command.width}:#{command.height}:out_range=full,format=yuv420p",
+      "-fps_mode",
+      "passthrough",
+      "-f",
+      "rawvideo",
+      "-flush_packets",
+      "1",
+      "pipe:1"
+    ]
   end
 
   defp validate_source(opts) do
@@ -250,9 +261,6 @@ defmodule BB.Camera.V4L.Command do
   end
 
   defp validate_input_format(value), do: {:error, {:invalid_input_format, value}}
-
-  defp validate_quality(value) when is_integer(value) and value in 1..31, do: {:ok, value}
-  defp validate_quality(value), do: {:error, {:invalid_quality, value}}
 
   defp validate_executable(nil) do
     case System.find_executable("ffmpeg") do

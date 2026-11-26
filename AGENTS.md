@@ -15,7 +15,7 @@ repository.
 module, `BB.Camera.V4L`, is both a `BB.Sensor` and a `BB.Camera`;
 `BB.Camera.V4L.Command` builds the ffmpeg argument vector.
 
-Running ffmpeg, flow control, JPEG framing and process cleanup live in
+Running ffmpeg, flow control, raw video framing and process cleanup live in
 `bb_camera_ffmpeg`, shared with `bb_camera_avf`. A fix there belongs there,
 not here.
 
@@ -62,10 +62,10 @@ channel. `Command.argv/1` always emits it, and `bb_camera_ffmpeg` refuses to
 start ffmpeg without it. It also means ffmpeg is stopped with `SIGTERM`, not
 with `q`.
 
-**Capture is confirmed on the first whole image, not on ffmpeg starting.**
+**Capture is confirmed on the first whole frame, not on ffmpeg starting.**
 ffmpeg existing says nothing about whether the device opened — it reports that
 by exiting non-zero a moment later. The driver confirms to the hub on
-`{:ready, info}` and then releases the held frame with `Capture.go/1`.
+`:ready` and then releases the held frame with `Capture.go/1`.
 Confirming earlier announces `BeginCapture` for cameras that are about to
 fail.
 
@@ -101,10 +101,28 @@ that diagnosis with a restart loop against hardware that is simply absent.
 
 ## Honesty about what is known
 
-The driver reports dimensions parsed from each frame's own `SOF` marker, which
-is the negotiated geometry rather than the requested one, and hands it to
-`Hub.update_stream_info/2`. The frame rate in `stream_info` is only ever the
-one that was *asked for*: this driver never queries the device's rate back.
+Frames are `{:raw, :I420}`, full-range, at exactly the configured width and
+height. Raw video doesn't describe itself and ffmpeg's stderr is not captured,
+so nothing could tell the driver what ffmpeg actually produced. The output is
+*forced* instead — `-vf scale=W:H:out_range=full,format=yuv420p` in
+`Command.argv/1` — and `Command` computes `frame_bytes` from the same numbers
+and owns the format (`Command.format/0`), so what the argument vector forces
+and what the driver claims can't drift apart. If the device negotiates a
+different size, ffmpeg scales to the requested one: consistency over fidelity.
+
+I420 needs even dimensions. `Command.new/1` and `stream_info/1` both refuse
+odd ones with `UnsupportedFormat{reason: :invalid_dimensions}`, via
+`BB.Camera.Format.frame_size/3`, and `init/1` and `handle_options/2` check
+before anything else — so a bad size is refused when the options are read.
+
+`-fps_mode passthrough` is deliberate. The rawvideo muxer otherwise defaults
+to a constant rate and duplicates frames to fill gaps, and each duplicate would
+reach the hub as a new capture with a new timestamp. There is no `-r`: rate is
+asked of the device with `-framerate`, and nothing on the output side should
+invent or drop frames.
+
+The frame rate in `stream_info` is only ever the one that was *asked for*:
+this driver never queries the device's rate back.
 
 This driver does not measure the real rate, and should not start. Every frame
 goes through `BB.Camera.Hub.deliver/2`, so the hub counts them itself and
@@ -112,11 +130,6 @@ publishes `BB.Message.Camera.CaptureState`. Measuring here as well would be a
 second answer to one question, and a worse one — the hub's window closes on a
 clock, so it still reports when frames have stopped, which an every-N-frames
 measurement in the driver cannot do.
-
-The chroma subsampling in `stream_info.metadata[:pixel_format]` is derived
-from the frame header's sampling factors, and is `nil` before any frame has
-arrived. It is a chroma format such as `:I420` — what `Membrane.JPEG` means by
-that name — not a codec and not a V4L2 input format.
 
 Do not report a requested value as a negotiated one without adding the query
 that would justify it, and do not add a list of supported resolutions: this
@@ -126,8 +139,13 @@ driver does not enumerate device capabilities, and
 ## Testing
 
 The test robot declares `BB.Camera.FFmpeg.Test.StubBackend` as its backend,
-and tests feed it images from `BB.Camera.FFmpeg.Test.JpegBuilder`. Both ship
-in `bb_camera_ffmpeg`'s `lib` for exactly this.
+and tests feed it raw I420 bytes of exactly one frame's size. It ships in
+`bb_camera_ffmpeg`'s `lib` for exactly this.
+
+The `:ffmpeg` tests capture ffmpeg's `color` source, which is black: full-range
+I420 black is luma 0 and chroma 128, so comparing the bytes proves the size,
+the plane layout and the range at once. A frame's length alone proves nothing,
+since the framer cuts every `frame_bytes` whatever ffmpeg wrote.
 
 **No test sleeps, and no timed negative assertions.** To show something did
 *not* happen, push a synchronous call through the process first and then use
@@ -140,7 +158,7 @@ systems by `test/test_helper.exs`.
 
 - `bb` — the framework
 - `bb_camera` — the `BB.Camera` behaviour, hub, frame and error types
-- `bb_camera_ffmpeg` — ffmpeg under MuonTrap, flow control and JPEG framing
+- `bb_camera_ffmpeg` — ffmpeg under MuonTrap, flow control and raw video framing
 
 ## Licensing headers
 

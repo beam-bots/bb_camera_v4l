@@ -16,8 +16,8 @@ SPDX-License-Identifier: Apache-2.0
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/beam-bots/bb_camera_v4l)
 
 A [Beam Bots](https://github.com/beam-bots/bb) camera driver for Linux V4L2
-devices — webcams, capture cards, CSI cameras — capturing MJPEG through a
-supervised ffmpeg process.
+devices — webcams, capture cards, CSI cameras — delivering raw I420 frames
+through a supervised ffmpeg process.
 
 It is a `BB.Sensor` and a `BB.Camera`, declared like any other sensor:
 
@@ -97,7 +97,7 @@ sibling checkout to fetch will resolve it from Hex to compile unless you say
 so again.
 
 Paste this robot into the session. It captures one of ffmpeg's own synthetic
-sources: real ffmpeg, real JPEG encoder, real pipe, real framing — and no
+sources: real ffmpeg, real scaler, real pipe, real framing — and no
 hardware.
 
 ```elixir
@@ -117,22 +117,23 @@ end
 
 {:ok, _pid} = SynthCam.start_link([])
 
-{:ok, session} = BB.Camera.Media.open(SynthCam, :eye, format: :jpeg)
+{:ok, session} = BB.Camera.Media.open(SynthCam, :eye, format: {:raw, :I420})
 {:ok, frame} = BB.Camera.Media.next(session, 10_000)
 
-{frame.width, frame.height, byte_size(frame.data)}
-#=> {320, 240, 8625}
+{frame.format, frame.width, frame.height, byte_size(frame.data)}
+#=> {{:raw, :I420}, 320, 240, 115200}
 
-File.write!("/tmp/frame.jpg", frame.data)
+File.write!("/tmp/frame.yuv", frame.data)
 BB.Camera.Media.close(session)
 ```
 
-Then, in another terminal, check it really is an image:
+Raw pixels don't describe themselves, so to look at one, tell ffmpeg what it
+is — full-range I420 at the size the frame reported — in another terminal:
 
 ```sh
-file /tmp/frame.jpg
-#=> /tmp/frame.jpg: JPEG image data, JFIF standard 1.02, ... 320x240, components 3
-xdg-open /tmp/frame.jpg
+ffmpeg -f rawvideo -pixel_format yuv420p -color_range pc -video_size 320x240 \
+  -i /tmp/frame.yuv /tmp/frame.png
+xdg-open /tmp/frame.png
 ```
 
 If that failed, nothing below will work, and the problem is ffmpeg rather than
@@ -175,13 +176,15 @@ ioctl: VIDIOC_ENUM_FMT
 
 A node that prints nothing under `Video Capture` is not the one you want.
 
-Note what it supports. If `MJPG` is listed, pick a size and rate from under it
-and the camera's own encoder does the work. If only `YUYV` is listed, pass
-`input_format: :yuyv422` and ffmpeg encodes instead, which costs real CPU per
-frame.
+Note what it supports. If `MJPG` is listed, pick a size and rate from under it;
+over USB 2 that is usually the only way to get a high frame rate. If only
+`YUYV` is listed, pass `input_format: :yuyv422`. Either way ffmpeg decodes to
+I420, which costs CPU per frame.
 
-This driver does not enumerate any of this for you, and does not pretend to
-know it. Ask for what you want; the frames report what you got.
+Pick a size the camera lists. This driver does not enumerate any of this for
+you, and if the camera hands back a different size from the one asked for,
+ffmpeg **scales it to the requested size** — stretching it if the aspect ratio
+differs — rather than reporting what the camera chose.
 
 ### 4. Check permissions
 
@@ -248,7 +251,7 @@ Discovery works before anything is capturing:
 ```elixir
 BB.Camera.discover(MyCam)
 #=> [%BB.Camera.Info{name: :eye, path: [:head, :eye], status: :running,
-#=>   stream_info: %BB.Camera.StreamInfo{format: :jpeg, width: 1280, height: 720, ...}}]
+#=>   stream_info: %BB.Camera.StreamInfo{format: {:raw, :I420}, width: 1280, height: 720, ...}}]
 ```
 
 Watch the lifecycle, then open a consumer:
@@ -256,30 +259,28 @@ Watch the lifecycle, then open a consumer:
 ```elixir
 BB.subscribe(MyCam, [:sensor, :head, :eye])
 
-{:ok, first} = BB.Camera.Media.open(MyCam, :eye, format: :jpeg)
+{:ok, first} = BB.Camera.Media.open(MyCam, :eye, format: {:raw, :I420})
 flush()
 #=> {:bb, [:sensor, :head, :eye],
 #=>   %BB.Message{payload: %BB.Message.Camera.BeginCapture{subscriber_count: 1, ...}}}
 
 {:ok, frame} = BB.Camera.Media.next(first, 10_000)
 {frame.width, frame.height}
-File.write!("/tmp/camera.jpg", frame.data)
+#=> {1280, 720}
+File.write!("/tmp/camera.yuv", frame.data)
 ```
 
-`frame.width` and `frame.height` are read out of the JPEG the camera actually
-produced. If you asked for a size it does not support and it quietly gave you
-another, this is where you find out:
-
-```elixir
-BB.Camera.stream_info(MyCam, :eye)
-```
+`frame.width` and `frame.height` are always the size you asked for. If the
+picture in `/tmp/camera.yuv` looks stretched or soft once converted as in step
+2, the camera gave ffmpeg a different size and ffmpeg scaled it; pick one from
+`--list-formats-ext` instead.
 
 ### 6. Two consumers, one capture
 
 Open a second one, and count the ffmpeg processes:
 
 ```elixir
-{:ok, second} = BB.Camera.Media.open(MyCam, :eye, format: :jpeg)
+{:ok, second} = BB.Camera.Media.open(MyCam, :eye, format: {:raw, :I420})
 {:ok, _frame} = BB.Camera.Media.next(second, 10_000)
 ```
 
@@ -320,7 +321,7 @@ closes for any reason, which is why there is nothing left here.
 ## A preview in a browser
 
 `bb_liveview` mounts a dashboard that previews any camera a robot declares,
-this one included, as MJPEG. Declare the camera in your robot and point the
+this one included. Declare the camera in your robot and point the
 dashboard at it; there is nothing driver-specific to wire up.
 
 Triage it the same way as the smoke test above. Swap this driver for
@@ -336,12 +337,10 @@ its permissions, and this README is where that is worked through.
 |---|---|---|
 | `:device` | — | V4L2 device node. Required unless `:lavfi` is given |
 | `:lavfi` | — | An ffmpeg synthetic source such as `"testsrc2"`, instead of a device |
-| `:width`, `:height` | `640`, `480` | Any positive size. Not checked against the device |
+| `:width`, `:height` | `640`, `480` | Any positive even size. Not checked against the device; every frame is this size |
 | `:frame_rate` | `30` | A hertz unit, a number, or `{numerator, denominator}` for an exact rational such as `{30_000, 1001}` |
-| `:input_format` | `:mjpeg` | V4L2 pixel format to ask for. Anything else means ffmpeg must encode |
-| `:quality` | `5` | ffmpeg's `-q:v`, 1 (best) to 31. Only used when encoding |
+| `:input_format` | `:mjpeg` | V4L2 pixel format to ask the camera for. Output is I420 either way |
 | `:ffmpeg` | `$PATH` | Path to the ffmpeg executable |
-| `:max_frame_bytes` | 4 MiB | Largest frame accepted before the stream is resynchronised |
 | `:drop_queue_len` | `8` | Shed frames while more reads than this are waiting |
 | `:stdio_window` | 256 KiB | Bytes of output ffmpeg may have in flight unacknowledged |
 | `:start_timeout_ms` | `10000` | Fail capture when no frame has arrived by then |
@@ -356,22 +355,24 @@ MuonTrap ──> ffmpeg ──pipe──> Capture ──frames──> BB.Camera.
 ```
 
 - **`BB.Camera.V4L.Command`** builds the argument vector and validates it.
-  No shell ever parses a device path.
+  No shell ever parses a device path. It forces ffmpeg's output to full-range
+  I420 at the configured size with `-vf scale=W:H:out_range=full,format=yuv420p`,
+  and passes frames through at whatever rate they arrive
+  (`-fps_mode passthrough`) rather than letting ffmpeg duplicate them to hold
+  a constant rate.
 - **[`bb_camera_ffmpeg`](https://github.com/beam-bots/bb_camera_ffmpeg)** does
   the rest, shared with `bb_camera_avf`:
   - it runs ffmpeg under MuonTrap, so ffmpeg cannot outlive the capture, its
     owner or the VM;
   - it flow-controls ffmpeg's output, so what can queue in the VM is bounded;
-  - it frames the JPEG stream by walking its marker structure, not by
-    searching for `FF D9`, which is wrong for any camera that embeds an EXIF
-    thumbnail;
+  - it cuts the raw video stream into frames of exactly one frame's size;
   - it holds the first frame until the hub has been told capture started.
 
 ## Limitations
 
 - **Linux only**, by design.
 - **Timestamps are arrival times, not exposure times, and are not suitable for
-  synchronisation.** The raw MJPEG stream ffmpeg writes has no container and
+  synchronisation.** The raw video stream ffmpeg writes has no container and
   therefore no timestamps of its own; a frame is stamped when the read
   completing it reached the BEAM. The gap between exposure and that moment
   covers the camera's pipeline, the USB transfer, V4L2's buffers, ffmpeg's
@@ -396,8 +397,13 @@ MuonTrap ──> ffmpeg ──pipe──> Capture ──frames──> BB.Camera.
   device.
 - **ffmpeg's diagnostics go to the VM's console**, not into the error, because
   merging its stderr into its stdout would corrupt every frame.
-- **JPEG only.** Interframe codecs are refused rather than carried; see
-  `bb_camera` for why.
+- **The requested size, always.** A camera that negotiates a different size
+  is scaled to the requested one rather than reported, because ffmpeg's
+  console output — the only place the negotiated size appears — is not
+  captured.
+- **I420 only, and decoded on the host.** MJPEG from the camera is decoded by
+  ffmpeg, which costs CPU per frame; `bb_camera` carries raw frames only.
+- **Requires ffmpeg 5.1 or later**, for `-fps_mode`.
 
 ## Testing
 

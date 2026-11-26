@@ -7,13 +7,14 @@ defmodule BB.Camera.V4LTest do
   # The stub reports to a registered name, which is global.
   use ExUnit.Case, async: false
 
-  alias BB.Camera.FFmpeg.Test.{JpegBuilder, StubBackend}
-  alias BB.Camera.Media
+  alias BB.Camera.FFmpeg.Test.StubBackend
+  alias BB.Camera.{Format, Media}
   alias BB.Camera.V4L
   alias BB.Camera.V4L.Test.StubBot
-  alias BB.Error.Invalid.Camera.UnknownStreamInfo
+  alias BB.Error.Invalid.Camera.{UnknownStreamInfo, UnsupportedFormat}
   alias BB.Message.Camera.{BeginCapture, EndCapture}
 
+  @format {:raw, :I420}
   @topic [:sensor, :head, :eye]
 
   setup do
@@ -29,7 +30,7 @@ defmodule BB.Camera.V4LTest do
       assert camera.name == :eye
       assert camera.path == [:head, :eye]
       assert camera.module == BB.Camera.V4L
-      assert camera.stream_info.format == :jpeg
+      assert camera.stream_info.format == @format
       assert {camera.stream_info.width, camera.stream_info.height} == {640, 480}
     end
 
@@ -47,7 +48,7 @@ defmodule BB.Camera.V4LTest do
                V4L.stream_info(device: "/dev/video9", width: 320, height: 200)
 
       assert {info.width, info.height} == {320, 200}
-      assert info.format == :jpeg
+      assert info.format == @format
     end
 
     test "refuses to guess when an option is an unresolved parameter reference" do
@@ -58,15 +59,15 @@ defmodule BB.Camera.V4LTest do
 
   describe "one capture, many consumers" do
     test "two consumers share a single capture" do
-      {:ok, first} = Media.open(StubBot, :eye, format: :jpeg)
+      {:ok, first} = Media.open(StubBot, :eye, format: @format)
       assert_receive {:stub_opened, stub, _command}
 
-      {:ok, second} = Media.open(StubBot, :eye, format: :jpeg)
+      {:ok, second} = Media.open(StubBot, :eye, format: @format)
 
       # A second ffmpeg would have announced itself here.
       refute_received {:stub_opened, _other, _command}
 
-      image = JpegBuilder.build(width: 640, height: 480)
+      image = frame_of(640, 480)
       :ok = StubBackend.feed(stub, image)
 
       assert {:ok, frame_one} = Media.next(first, 5_000)
@@ -79,7 +80,7 @@ defmodule BB.Camera.V4LTest do
     end
 
     test "no second capture is opened until the first has really gone" do
-      {:ok, session} = Media.open(StubBot, :eye, format: :jpeg)
+      {:ok, session} = Media.open(StubBot, :eye, format: @format)
       assert_receive {:stub_opened, stub, _command}
 
       :ok = Media.close(session)
@@ -87,7 +88,7 @@ defmodule BB.Camera.V4LTest do
 
       # The stub has been asked to stop but has not exited, so as far as this
       # driver knows ffmpeg still holds the device.
-      {:ok, _session} = Media.open(StubBot, :eye, format: :jpeg)
+      {:ok, _session} = Media.open(StubBot, :eye, format: @format)
 
       # A synchronous round trip through the hub proves the request has been
       # handled, so an empty mailbox means no second capture was opened.
@@ -101,14 +102,14 @@ defmodule BB.Camera.V4LTest do
     end
 
     test "capture stops when the last consumer leaves, and starts again for the next" do
-      {:ok, session} = Media.open(StubBot, :eye, format: :jpeg)
+      {:ok, session} = Media.open(StubBot, :eye, format: @format)
       assert_receive {:stub_opened, stub, _command}
 
       :ok = Media.close(session)
       assert_receive {:stub_stop_requested, ^stub}
       :ok = StubBackend.exited(stub, 0)
 
-      {:ok, session} = Media.open(StubBot, :eye, format: :jpeg)
+      {:ok, session} = Media.open(StubBot, :eye, format: @format)
       assert_receive {:stub_opened, _stub, _command}
 
       Media.close(session)
@@ -119,17 +120,17 @@ defmodule BB.Camera.V4LTest do
     test "publishes capture start and end, and never a frame" do
       BB.subscribe(StubBot, @topic)
 
-      {:ok, session} = Media.open(StubBot, :eye, format: :jpeg)
+      {:ok, session} = Media.open(StubBot, :eye, format: @format)
       assert_receive {:stub_opened, stub, _command}
 
       # Nothing has been captured yet, so nothing claims it has been.
       BB.Camera.stream_info(StubBot, :eye)
       refute_received {:bb, @topic, %BB.Message{payload: %BeginCapture{}}}
 
-      :ok = StubBackend.feed(stub, JpegBuilder.build())
+      :ok = StubBackend.feed(stub, frame_of(640, 480))
 
       assert_receive {:bb, @topic, %BB.Message{payload: %BeginCapture{} = begun}}
-      assert begun.stream_info.format == :jpeg
+      assert begun.stream_info.format == @format
 
       assert {:ok, _frame} = Media.next(session, 5_000)
 
@@ -146,10 +147,10 @@ defmodule BB.Camera.V4LTest do
     test "a capture that never produces a frame is a failure, not a beginning" do
       BB.subscribe(StubBot, @topic)
 
-      {:ok, _session} = Media.open(StubBot, :eye, format: :jpeg)
+      {:ok, _session} = Media.open(StubBot, :eye, format: @format)
       assert_receive {:stub_opened, stub, _command}
 
-      # ffmpeg exits non-zero without ever writing an image, which is what a
+      # ffmpeg exits non-zero without ever writing a frame, which is what a
       # missing or busy device looks like.
       :ok = StubBackend.exited(stub, 1)
 
@@ -161,40 +162,30 @@ defmodule BB.Camera.V4LTest do
     end
   end
 
-  describe "reporting what the camera actually produced" do
-    test "corrects the declared dimensions from the frame's own header" do
-      {:ok, session} = Media.open(StubBot, :eye, format: :jpeg)
+  describe "the frames it delivers" do
+    test "are I420 at the configured size, with the bytes ffmpeg wrote" do
+      {:ok, session} = Media.open(StubBot, :eye, format: @format)
       assert_receive {:stub_opened, stub, _command}
 
-      # Declared 640x480; the device hands back 320x240 instead.
-      :ok = StubBackend.feed(stub, JpegBuilder.build(width: 320, height: 240))
+      data = frame_of(640, 480)
+      :ok = StubBackend.feed(stub, data)
 
       assert {:ok, frame} = Media.next(session, 5_000)
-      assert {frame.width, frame.height} == {320, 240}
-
-      assert {:ok, info} = BB.Camera.stream_info(StubBot, :eye)
-      assert {info.width, info.height} == {320, 240}
-
-      Media.close(session)
-    end
-
-    test "reports the chroma subsampling it read out of the frame" do
-      {:ok, session} = Media.open(StubBot, :eye, format: :jpeg)
-      assert_receive {:stub_opened, stub, _command}
-
-      :ok = StubBackend.feed(stub, JpegBuilder.build(sampling: {2, 1}))
-      assert {:ok, _frame} = Media.next(session, 5_000)
-
-      assert {:ok, info} = BB.Camera.stream_info(StubBot, :eye)
-      assert info.metadata.pixel_format == :I422
+      assert frame.format == @format
+      assert {frame.width, frame.height} == {640, 480}
+      assert frame.data == data
 
       Media.close(session)
     end
+  end
 
-    test "declares no pixel format before it has seen a frame" do
-      assert {:ok, info} = V4L.stream_info(device: "/dev/video0", width: 640, height: 480)
+  describe "dimensions I420 cannot take" do
+    test "are refused when the options are read" do
+      assert {:error, %UnsupportedFormat{reason: :invalid_dimensions}} =
+               V4L.stream_info(device: "/dev/video0", width: 641, height: 480)
 
-      assert info.metadata.pixel_format == nil
+      assert {:error, %UnsupportedFormat{reason: :invalid_dimensions}} =
+               V4L.stream_info(device: "/dev/video0", width: 640, height: 479)
     end
   end
 
@@ -202,9 +193,9 @@ defmodule BB.Camera.V4LTest do
     test "a new width restarts capture with it" do
       BB.subscribe(StubBot, @topic)
 
-      {:ok, session} = Media.open(StubBot, :eye, format: :jpeg)
+      {:ok, session} = Media.open(StubBot, :eye, format: @format)
       assert_receive {:stub_opened, stub, _command}
-      :ok = StubBackend.feed(stub, JpegBuilder.build())
+      :ok = StubBackend.feed(stub, frame_of(640, 480))
       assert {:ok, _frame} = Media.next(session, 5_000)
       assert_receive {:bb, @topic, %BB.Message{payload: %BeginCapture{}}}
 
@@ -220,7 +211,7 @@ defmodule BB.Camera.V4LTest do
       assert "320x480" in args
 
       # And the replacement only claims to be capturing once it really is.
-      :ok = StubBackend.feed(restarted, JpegBuilder.build(width: 320, height: 480))
+      :ok = StubBackend.feed(restarted, frame_of(320, 480))
       assert_receive {:bb, @topic, %BB.Message{payload: %BeginCapture{}}}
     end
 
@@ -245,7 +236,7 @@ defmodule BB.Camera.V4LTest do
 
   describe "the ffmpeg command" do
     test "is built from the declared options without a shell" do
-      {:ok, session} = Media.open(StubBot, :eye, format: :jpeg)
+      {:ok, session} = Media.open(StubBot, :eye, format: @format)
       assert_receive {:stub_opened, _stub, {executable, argv, _opts}}
 
       assert executable == "/nonexistent/ffmpeg"
@@ -257,5 +248,11 @@ defmodule BB.Camera.V4LTest do
 
       Media.close(session)
     end
+  end
+
+  defp frame_of(width, height) do
+    {:ok, size} = Format.frame_size(@format, width, height)
+
+    :binary.copy(<<128>>, size)
   end
 end

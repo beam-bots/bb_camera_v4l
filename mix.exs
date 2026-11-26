@@ -81,8 +81,8 @@ defmodule BB.Camera.V4L.MixProject do
   defp deps do
     [
       {:bb, bb_dep("~> 0.33")},
-      {:bb_camera, bb_dep("~> 0.1", :bb_camera)},
-      {:bb_camera_ffmpeg, bb_dep("~> 0.1", :bb_camera_ffmpeg)},
+      {:bb_camera, bb_dep("~> 0.2", :bb_camera)},
+      {:bb_camera_ffmpeg, bb_dep("~> 0.2", :bb_camera_ffmpeg)},
 
       # dev/test
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},

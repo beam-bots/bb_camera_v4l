@@ -234,6 +234,18 @@ defmodule BB.Camera.V4LTest do
     end
   end
 
+  describe "losing its hub" do
+    test "stops the driver, which traps exits and would otherwise outlive it" do
+      sensor = BB.Process.whereis(StubBot, :eye)
+      {:ok, hub} = BB.Camera.hub(StubBot, :eye)
+      monitor = Process.monitor(sensor)
+
+      Process.exit(hub, :kill)
+
+      assert_receive {:DOWN, ^monitor, :process, ^sensor, :killed}
+    end
+  end
+
   describe "the ffmpeg command" do
     test "is built from the declared options without a shell" do
       {:ok, session} = Media.open(StubBot, :eye, format: @format)

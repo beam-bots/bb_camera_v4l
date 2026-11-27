@@ -271,6 +271,11 @@ defmodule BB.Camera.V4L do
   def handle_info({:bb_camera_ffmpeg, capture, event}, %{capture: capture} = state),
     do: {:noreply, handle_capture_event(state, event)}
 
+  # The hub is linked because a driver and its hub are useless apart, but
+  # trapping exits turns its death into a message. Stop as the link would have
+  # done, rather than carry on serving a camera nobody can reach.
+  def handle_info({:EXIT, hub, reason}, %{hub: hub} = state), do: {:stop, reason, state}
+
   def handle_info({:EXIT, capture, reason}, %{stopping: capture} = state) do
     state = %{state | stopping: nil}
 

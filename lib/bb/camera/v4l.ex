@@ -334,7 +334,11 @@ defmodule BB.Camera.V4L do
 
   @impl BB.Sensor
   def terminate(_reason, state) do
-    if state.capture, do: Capture.stop(state.capture)
+    # WARNING: this blocks for up to `stop_timeout_ms` plus a second per
+    # capture, which has to fit inside the sensor's shutdown timeout.
+    for capture <- [state.capture, state.stopping],
+        is_pid(capture),
+        do: Capture.stop_and_wait(capture)
 
     :ok
   end
